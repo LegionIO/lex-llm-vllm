@@ -1,7 +1,7 @@
 # frozen_string_literal: true
 
 require 'legion/extensions/llm'
-require 'legion/extensions/llm/vllm/provider_settings'
+require 'legion/extensions/llm/vllm/provider'
 require 'legion/extensions/llm/vllm/version'
 
 module Legion
@@ -14,18 +14,25 @@ module Legion
         PROVIDER_FAMILY = :vllm
 
         def self.default_settings
-          ProviderSettings.build(
+          ::Legion::Extensions::Llm.provider_settings(
             family: PROVIDER_FAMILY,
             instance: {
               endpoint: 'http://localhost:8000',
               tier: :private,
               transport: :http,
-              usage: { inference: true, embedding: false },
+              usage: { inference: true, embedding: true },
               limits: { concurrency: 8 }
             }
           )
+        end
+
+        def self.provider_class
+          Provider
         end
       end
     end
   end
 end
+
+LexLLM::Provider.register(Legion::Extensions::Llm::Vllm::PROVIDER_FAMILY,
+                          Legion::Extensions::Llm::Vllm::Provider)
