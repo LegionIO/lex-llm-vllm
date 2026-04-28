@@ -4,6 +4,8 @@ LegionIO LLM provider extension for vLLM.
 
 This gem lives under `Legion::Extensions::Llm::Vllm` and depends on `lex-llm` for shared provider-neutral routing, fleet, and schema primitives.
 
+Load it with `require 'legion/extensions/llm/vllm'`.
+
 ## What It Provides
 
 - `Legion::Extensions::Llm::Provider` registration as `:vllm`
