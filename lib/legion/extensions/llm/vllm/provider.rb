@@ -28,6 +28,15 @@ module Legion
             def vision?(_model) = true
             def functions?(_model) = true
             def embeddings?(_model) = true
+
+            def critical_capabilities_for(model)
+              [
+                ('streaming' if streaming?(model)),
+                ('function_calling' if functions?(model)),
+                ('vision' if vision?(model)),
+                ('embeddings' if embeddings?(model))
+              ].compact
+            end
           end
 
           def api_base

@@ -15,6 +15,7 @@ Load it with `require 'legion/extensions/llm/vllm'`.
 - model discovery through `GET /v1/models`
 - embeddings through `POST /v1/embeddings`
 - vLLM management helpers for `/health`, `/version`, `/reset_prefix_cache`, `/reset_mm_cache`, `/sleep`, and `/wake_up`
+- normalized OpenAI-compatible capability and modality metadata for discovered models
 - shared fleet/default settings via `Legion::Extensions::Llm.provider_settings`
 
 ## Defaults

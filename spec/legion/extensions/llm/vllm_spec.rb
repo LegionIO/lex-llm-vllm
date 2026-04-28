@@ -51,8 +51,24 @@ RSpec.describe Legion::Extensions::Llm::Vllm do
     Legion::Extensions::Llm.config.vllm_api_key = original
   end
 
+  it 'maps discovered models to explicit OpenAI-compatible routing metadata' do
+    models = provider.send(:parse_list_models_response, fake_response(models_body), :vllm,
+                           described_class::Provider.capabilities)
+
+    expect(models.first.capabilities).to eq(%w[streaming function_calling vision embeddings])
+    expect(models.first.modalities.to_h).to eq(input: %w[text image], output: ['text'])
+  end
+
   def management_urls
     [provider.health_url, provider.version_url, provider.reset_prefix_cache_url, provider.reset_mm_cache_url,
      provider.sleep_url, provider.wake_up_url]
+  end
+
+  def models_body
+    { 'data' => [{ 'id' => 'meta-llama/Llama-3.1-8B-Instruct', 'created' => 1 }] }
+  end
+
+  def fake_response(body)
+    Struct.new(:body).new(body)
   end
 end
