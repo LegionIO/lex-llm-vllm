@@ -3,8 +3,8 @@
 require 'spec_helper'
 
 RSpec.describe Legion::Extensions::Llm::Vllm do
-  let(:provider) { described_class::Provider.new(LexLLM.config) }
-  let(:model) { LexLLM::Model::Info.new(id: 'meta-llama/Llama-3.1-8B-Instruct', provider: :vllm) }
+  let(:provider) { described_class::Provider.new(Legion::Extensions::Llm.config) }
+  let(:model) { Legion::Extensions::Llm::Model::Info.new(id: 'meta-llama/Llama-3.1-8B-Instruct', provider: :vllm) }
 
   it 'exposes provider defaults with inherited fleet settings' do
     settings = described_class.default_settings
@@ -15,12 +15,12 @@ RSpec.describe Legion::Extensions::Llm::Vllm do
     expect(settings.dig(:instances, :default, :usage, :embedding)).to be true
   end
 
-  it 'registers the LexLLM provider class' do
-    expect(LexLLM::Provider.resolve(:vllm)).to eq(described_class::Provider)
+  it 'registers the Legion::Extensions::Llm provider class' do
+    expect(Legion::Extensions::Llm::Provider.resolve(:vllm)).to eq(described_class::Provider)
   end
 
   it 'uses the shared OpenAI-compatible provider adapter' do
-    expect(described_class::Provider.ancestors).to include(LexLLM::Provider::OpenAICompatible)
+    expect(described_class::Provider.ancestors).to include(Legion::Extensions::Llm::Provider::OpenAICompatible)
   end
 
   it 'exposes OpenAI-compatible base endpoint helpers' do
@@ -34,7 +34,7 @@ RSpec.describe Legion::Extensions::Llm::Vllm do
   end
 
   it 'renders chat payloads through the shared OpenAI-compatible adapter' do
-    message = LexLLM::Message.new(role: :user, content: 'hello')
+    message = Legion::Extensions::Llm::Message.new(role: :user, content: 'hello')
     payload = provider.send(:render_payload, [message], tools: {}, temperature: 0.2, model: model, stream: false,
                                                         schema: nil, thinking: nil, tool_prefs: nil)
 
@@ -43,12 +43,12 @@ RSpec.describe Legion::Extensions::Llm::Vllm do
   end
 
   it 'uses an optional bearer token when configured' do
-    original = LexLLM.config.vllm_api_key
-    LexLLM.config.vllm_api_key = 'token-abc123'
+    original = Legion::Extensions::Llm.config.vllm_api_key
+    Legion::Extensions::Llm.config.vllm_api_key = 'token-abc123'
 
     expect(provider.headers).to eq('Authorization' => 'Bearer token-abc123')
   ensure
-    LexLLM.config.vllm_api_key = original
+    Legion::Extensions::Llm.config.vllm_api_key = original
   end
 
   def management_urls

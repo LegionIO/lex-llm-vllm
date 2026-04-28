@@ -6,8 +6,8 @@ This gem lives under `Legion::Extensions::Llm::Vllm` and depends on `lex-llm` fo
 
 ## What It Provides
 
-- `LexLLM::Provider` registration as `:vllm`
-- shared `LexLLM::Provider::OpenAICompatible` request and response handling
+- `Legion::Extensions::Llm::Provider` registration as `:vllm`
+- shared `Legion::Extensions::Llm::Provider::OpenAICompatible` request and response handling
 - chat requests through `POST /v1/chat/completions`
 - streaming chat support
 - model discovery through `GET /v1/models`
@@ -36,7 +36,7 @@ Legion::Extensions::Llm::Vllm.default_settings
 ## Configuration
 
 ```ruby
-LexLLM.configure do |config|
+Legion::Extensions::Llm.configure do |config|
   config.vllm_api_base = "http://localhost:8000"
   config.vllm_api_key = ENV["VLLM_API_KEY"]
   config.default_model = "meta-llama/Llama-3.1-8B-Instruct"

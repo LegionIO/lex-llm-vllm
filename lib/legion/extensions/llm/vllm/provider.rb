@@ -1,15 +1,15 @@
 # frozen_string_literal: true
 
-require 'lex_llm'
+require 'legion/extensions/llm'
 require 'uri'
 
 module Legion
   module Extensions
     module Llm
       module Vllm
-        # vLLM provider implementation for the LexLLM base provider contract.
-        class Provider < LexLLM::Provider
-          include LexLLM::Provider::OpenAICompatible
+        # vLLM provider implementation for the Legion::Extensions::Llm base provider contract.
+        class Provider < Legion::Extensions::Llm::Provider
+          include Legion::Extensions::Llm::Provider::OpenAICompatible
 
           class << self
             def slug = 'vllm'
