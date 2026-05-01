@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.7 - 2026-04-30
+
+- Enable stream_usage_supported? for streaming token usage reporting
+- Add render_payload override with chat_template_kwargs for vLLM thinking mode
+- Add thinking_enabled? setting support from Legion::Settings
+
 ## 0.1.6 - 2026-04-28
 
 - Publish best-effort `llm.registry` readiness and discovered-model availability events when transport is loaded.

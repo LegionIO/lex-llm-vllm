@@ -45,6 +45,8 @@ module Legion
             end
           end
 
+          def stream_usage_supported? = true
+
           def api_base
             config.vllm_api_base || 'http://localhost:8000'
           end
@@ -101,6 +103,30 @@ module Legion
           end
 
           private
+
+          def render_payload(messages, tools:, temperature:, model:, stream:, schema:, thinking:, tool_prefs:) # rubocop:disable Metrics/ParameterLists
+            payload = super
+            payload.delete(:reasoning_effort)
+            payload[:chat_template_kwargs] = { enable_thinking: true } if thinking_enabled?(thinking)
+            payload
+          end
+
+          def thinking_enabled?(thinking)
+            return true if thinking.is_a?(Hash) && (thinking[:enabled] != false)
+            return true if thinking.respond_to?(:enabled?) && thinking.enabled?
+            return vllm_thinking_setting unless thinking
+
+            false
+          end
+
+          def vllm_thinking_setting
+            return false unless defined?(Legion::Settings)
+
+            vllm = Legion::Settings.dig(:llm, :providers, :vllm)
+            vllm.is_a?(Hash) && (vllm[:enable_thinking] == true || vllm['enable_thinking'] == true)
+          rescue StandardError
+            false
+          end
 
           def with_query(path, positional = [], **params)
             pairs = positional + params.compact.map { |key, value| [key.to_s, value] }
