@@ -10,7 +10,7 @@ module Legion
         # vLLM provider implementation for the Legion::Extensions::Llm base provider contract.
         class Provider < Legion::Extensions::Llm::Provider
           include Legion::Extensions::Llm::Provider::OpenAICompatible
-          include Legion::Logging::Helper
+          include Legion::Logging::Helper if defined?(Legion::Logging::Helper)
 
           class << self
             attr_writer :registry_publisher

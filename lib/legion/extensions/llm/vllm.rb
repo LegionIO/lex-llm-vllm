@@ -12,7 +12,7 @@ module Legion
       # Vllm provider extension namespace.
       module Vllm
         extend ::Legion::Extensions::Core if ::Legion::Extensions.const_defined?(:Core, false)
-        extend Legion::Logging::Helper
+        extend Legion::Logging::Helper if defined?(Legion::Logging::Helper)
 
         PROVIDER_FAMILY = :vllm
 
