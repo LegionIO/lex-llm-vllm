@@ -13,8 +13,6 @@ module Legion
           include Legion::Logging::Helper
 
           class << self
-            attr_writer :registry_publisher
-
             def slug = 'vllm'
             def local? = false
             def configuration_options = %i[vllm_api_base vllm_api_key]
@@ -22,7 +20,7 @@ module Legion
             def capabilities = Capabilities
 
             def registry_publisher
-              @registry_publisher ||= RegistryPublisher.new
+              Vllm.registry_publisher
             end
           end
 
@@ -133,6 +131,22 @@ module Legion
           rescue StandardError => e
             handle_exception(e, level: :debug, handled: true, operation: 'vllm.thinking_setting')
             false
+          end
+
+          def parse_list_models_response(response, provider, capabilities)
+            response.body.fetch('data', []).map do |model|
+              critical_capabilities = critical_capabilities_for(capabilities, model)
+              Legion::Extensions::Llm::Model::Info.from_hash(
+                id: model.fetch('id'),
+                name: model['id'],
+                provider: provider,
+                created_at: model_created_at(model['created']),
+                context_length: model['max_model_len'],
+                capabilities: critical_capabilities,
+                modalities: modalities_for_capabilities(critical_capabilities),
+                metadata: model
+              )
+            end
           end
 
           def with_query(path, positional = [], **params)

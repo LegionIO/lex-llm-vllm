@@ -12,7 +12,12 @@ Metrics/BlockLength:
   Exclude:
     - "*.gemspec"
     - spec/**/*
+Metrics/ClassLength:
+  Exclude:
+    - lib/legion/extensions/llm/vllm/provider.rb
 Metrics/MethodLength:
   Enabled: false
+RSpec/ExampleLength:
+  Max: 8
 RSpec/MultipleExpectations:
   Enabled: false

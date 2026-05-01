@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.1.9 - 2026-04-30
+
+- Adopt base provider contract from lex-llm 0.1.9
+- Replace local `RegistryEventBuilder` and `RegistryPublisher` with parameterized base versions
+- Delete local `transport/` directory; base gem now ships shared exchange and message classes
+- Remove deprecated `Provider.register` call; provider options registered via `Configuration.register_provider_options`
+- Simplify `default_settings` to a flat hash (no longer delegates to `ProviderSettings.build`)
+- Override `parse_list_models_response` to populate `context_length` from vLLM `max_model_len` field
+- Require `lex-llm >= 0.1.9`
+
 ## 0.1.8 - 2026-04-30
 
 - Add `Legion::Logging::Helper` to all modules and classes for structured logging

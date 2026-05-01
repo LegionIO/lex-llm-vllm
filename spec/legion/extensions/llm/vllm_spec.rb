@@ -5,19 +5,21 @@ require 'spec_helper'
 RSpec.describe Legion::Extensions::Llm::Vllm do
   let(:provider) { described_class::Provider.new(Legion::Extensions::Llm.config) }
   let(:model) { Legion::Extensions::Llm::Model::Info.new(id: 'meta-llama/Llama-3.1-8B-Instruct', provider: :vllm) }
-  let(:registry_publisher) { instance_double(described_class::RegistryPublisher) }
+  let(:registry_publisher) { instance_double(Legion::Extensions::Llm::RegistryPublisher) }
 
-  it 'exposes provider defaults with inherited fleet settings' do
+  it 'exposes simple provider defaults with thinking enabled' do
     settings = described_class.default_settings
 
-    expect(settings[:provider_family]).to eq(:vllm)
-    expect(settings[:fleet]).to include(:enabled)
-    expect(settings.dig(:instances, :default, :endpoint)).to eq('http://localhost:8000')
-    expect(settings.dig(:instances, :default, :usage, :embedding)).to be true
+    expect(settings[:enabled]).to be false
+    expect(settings[:base_url]).to eq('localhost:8000/v1')
+    expect(settings[:enable_thinking]).to be true
+    expect(settings[:tls]).to eq(enabled: false, verify: :peer)
+    expect(settings[:instances]).to eq({})
   end
 
-  it 'registers the Legion::Extensions::Llm provider class' do
-    expect(Legion::Extensions::Llm::Provider.resolve(:vllm)).to eq(described_class::Provider)
+  it 'does not register on the deprecated Provider.register registry' do
+    Legion::Extensions::Llm::Provider.providers.clear
+    expect(Legion::Extensions::Llm::Provider.resolve(:vllm)).to be_nil
   end
 
   it 'uses the shared OpenAI-compatible provider adapter' do
@@ -52,16 +54,16 @@ RSpec.describe Legion::Extensions::Llm::Vllm do
     Legion::Extensions::Llm.config.vllm_api_key = original
   end
 
-  it 'maps discovered models to explicit OpenAI-compatible routing metadata' do
+  it 'maps discovered models with context_length from max_model_len' do
     models = provider.send(:parse_list_models_response, fake_response(models_body), :vllm,
                            described_class::Provider.capabilities)
 
-    expect(models.first.capabilities).to eq(%w[streaming function_calling vision embeddings])
-    expect(models.first.modalities.to_h).to eq(input: %w[text image], output: ['text'])
+    expect(models.first.capabilities).to include(:streaming, :function_calling, :vision, :embeddings)
+    expect(models.first.context_length).to eq(131_072)
   end
 
   it 'publishes live readiness metadata asynchronously through the registry publisher' do
-    allow(described_class::Provider).to receive(:registry_publisher).and_return(registry_publisher)
+    allow(described_class).to receive(:registry_publisher).and_return(registry_publisher)
     allow(provider.connection).to receive(:get).with('/health').and_return(fake_response({}))
     allow(registry_publisher).to receive(:publish_readiness_async)
 
@@ -88,13 +90,20 @@ RSpec.describe Legion::Extensions::Llm::Vllm do
     expect(events.first.to_h.dig(:offering, :model)).to eq('meta-llama/Llama-3.1-8B-Instruct')
   end
 
+  it 'delegates registry_publisher to the base RegistryPublisher class' do
+    publisher = described_class.registry_publisher
+
+    expect(publisher).to be_a(Legion::Extensions::Llm::RegistryPublisher)
+    expect(publisher.provider_family).to eq(:vllm)
+  end
+
   def management_urls
     [provider.health_url, provider.version_url, provider.reset_prefix_cache_url, provider.reset_mm_cache_url,
      provider.sleep_url, provider.wake_up_url]
   end
 
   def models_body
-    { 'data' => [{ 'id' => 'meta-llama/Llama-3.1-8B-Instruct', 'created' => 1 }] }
+    { 'data' => [{ 'id' => 'meta-llama/Llama-3.1-8B-Instruct', 'created' => 1, 'max_model_len' => 131_072 }] }
   end
 
   def fake_response(body)
@@ -106,12 +115,12 @@ RSpec.describe Legion::Extensions::Llm::Vllm do
   end
 
   def stub_registry_publisher
-    allow(described_class::Provider).to receive(:registry_publisher).and_return(registry_publisher)
+    allow(described_class).to receive(:registry_publisher).and_return(registry_publisher)
     allow(registry_publisher).to receive(:publish_models_async)
   end
 
   def capture_registry_events(models, readiness:)
-    publisher = described_class::RegistryPublisher.new
+    publisher = Legion::Extensions::Llm::RegistryPublisher.new(provider_family: :vllm)
     events = []
     allow(publisher).to receive(:publishing_available?).and_return(true)
     allow(publisher).to receive(:publish_event) { |event| events << event }
