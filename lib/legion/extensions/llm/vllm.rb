@@ -11,6 +11,7 @@ module Legion
       module Vllm
         extend ::Legion::Extensions::Core if ::Legion::Extensions.const_defined?(:Core, false)
         extend Legion::Logging::Helper
+        extend Legion::Extensions::Llm::AutoRegistration
 
         PROVIDER_FAMILY = :vllm
 
@@ -36,8 +37,33 @@ module Legion
           @registry_publisher ||= Legion::Extensions::Llm::RegistryPublisher.new(provider_family: PROVIDER_FAMILY)
         end
 
-        Legion::Extensions::Llm::Configuration.register_provider_options(Provider.configuration_options)
+        def self.discover_instances
+          instances = {}
+
+          if CredentialSources.http_ok?('http://localhost:8000', path: '/health', timeout: 0.1)
+            instances[:local] = {
+              vllm_api_base: 'http://localhost:8000',
+              tier: :local,
+              capabilities: [:completion]
+            }
+          end
+
+          configured = CredentialSources.setting(:extensions, :llm, :vllm, :instances)
+          if configured.is_a?(Hash)
+            configured.each do |name, config|
+              instances[name.to_sym] = config.merge(tier: :direct)
+            end
+          end
+
+          instances
+        end
+
+        if Legion::Extensions::Llm::Configuration.respond_to?(:register_provider_options)
+          Legion::Extensions::Llm::Configuration.register_provider_options(Provider.configuration_options)
+        end
       end
     end
   end
 end
+
+Legion::Extensions::Llm::Vllm.register_discovered_instances

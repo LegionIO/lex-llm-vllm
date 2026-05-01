@@ -18,8 +18,7 @@ RSpec.describe Legion::Extensions::Llm::Vllm do
   end
 
   it 'does not register on the deprecated Provider.register registry' do
-    Legion::Extensions::Llm::Provider.providers.clear
-    expect(Legion::Extensions::Llm::Provider.resolve(:vllm)).to be_nil
+    expect(Legion::Extensions::Llm::Provider).not_to respond_to(:resolve)
   end
 
   it 'uses the shared OpenAI-compatible provider adapter' do
@@ -97,6 +96,56 @@ RSpec.describe Legion::Extensions::Llm::Vllm do
     expect(publisher.provider_family).to eq(:vllm)
   end
 
+  describe '.discover_instances' do
+    before do
+      allow(Legion::Extensions::Llm::CredentialSources).to receive_messages(http_ok?: false, setting: nil)
+    end
+
+    it 'returns local instance when vLLM health endpoint is reachable' do
+      stub_local_health(true)
+      instances = described_class.discover_instances
+
+      expect(instances[:local]).to eq(
+        vllm_api_base: 'http://localhost:8000', tier: :local, capabilities: [:completion]
+      )
+    end
+
+    it 'omits local instance when vLLM health endpoint is unreachable' do
+      instances = described_class.discover_instances
+
+      expect(instances).not_to have_key(:local)
+    end
+
+    it 'returns configured instances from extension settings' do
+      stub_vllm_settings({ gpu_cluster: { vllm_api_base: 'http://gpu-node:8000' } })
+      instances = described_class.discover_instances
+
+      expect(instances[:gpu_cluster]).to eq(vllm_api_base: 'http://gpu-node:8000', tier: :direct)
+    end
+
+    it 'returns both local and configured instances when both are available' do
+      stub_local_health(true)
+      stub_vllm_settings({ remote: { vllm_api_base: 'http://remote:8000' } })
+      instances = described_class.discover_instances
+
+      expect(instances.keys).to contain_exactly(:local, :remote)
+      expect(instances[:local][:tier]).to eq(:local)
+      expect(instances[:remote][:tier]).to eq(:direct)
+    end
+
+    it 'returns empty hash when nothing is available' do
+      instances = described_class.discover_instances
+
+      expect(instances).to eq({})
+    end
+
+    it 'ignores settings when the value is not a Hash' do
+      stub_vllm_settings('not-a-hash')
+
+      expect(described_class.discover_instances).to eq({})
+    end
+  end
+
   def management_urls
     [provider.health_url, provider.version_url, provider.reset_prefix_cache_url, provider.reset_mm_cache_url,
      provider.sleep_url, provider.wake_up_url]
@@ -117,6 +166,18 @@ RSpec.describe Legion::Extensions::Llm::Vllm do
   def stub_registry_publisher
     allow(described_class).to receive(:registry_publisher).and_return(registry_publisher)
     allow(registry_publisher).to receive(:publish_models_async)
+  end
+
+  def stub_local_health(result)
+    allow(Legion::Extensions::Llm::CredentialSources).to receive(:http_ok?)
+      .with('http://localhost:8000', path: '/health', timeout: 0.1)
+      .and_return(result)
+  end
+
+  def stub_vllm_settings(value)
+    allow(Legion::Extensions::Llm::CredentialSources).to receive(:setting)
+      .with(:extensions, :llm, :vllm, :instances)
+      .and_return(value)
   end
 
   def capture_registry_events(models, readiness:)
