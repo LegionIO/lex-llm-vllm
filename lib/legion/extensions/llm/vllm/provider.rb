@@ -46,8 +46,12 @@ module Legion
 
           def stream_usage_supported? = true
 
+          def settings
+            Vllm.default_settings
+          end
+
           def api_base
-            config.vllm_api_base || 'http://localhost:8000'
+            normalize_url(config.vllm_api_base || 'localhost:8000')
           end
 
           def headers
