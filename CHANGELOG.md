@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.1.8 - 2026-04-30
+
+- Add `Legion::Logging::Helper` to all modules and classes for structured logging
+- Replace all bare rescue blocks with `handle_exception` calls for full observability
+- Add info-level action logging to Provider key actions (health, readiness, list_models, version)
+- Add info-level logging to RegistryPublisher publish methods
+- Remove custom `log_publish_failure` method in favor of standard `handle_exception`
+- Update README to reflect registry publishing, thinking mode, and management endpoints
+
 ## 0.1.7 - 2026-04-30
 
 - Enable stream_usage_supported? for streaming token usage reporting

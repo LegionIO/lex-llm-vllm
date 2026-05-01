@@ -10,6 +10,7 @@ module Legion
         # vLLM provider implementation for the Legion::Extensions::Llm base provider contract.
         class Provider < Legion::Extensions::Llm::Provider
           include Legion::Extensions::Llm::Provider::OpenAICompatible
+          include Legion::Logging::Helper
 
           class << self
             attr_writer :registry_publisher
@@ -66,22 +67,27 @@ module Legion
           def wake_up_url = '/wake_up'
 
           def health
+            log.info { "checking health at #{api_base}#{health_url}" }
             connection.get(health_url).body
           end
 
           def readiness(live: false)
+            log.info { "checking readiness live=#{live} at #{api_base}" }
             super.tap do |metadata|
               self.class.registry_publisher.publish_readiness_async(metadata) if live
             end
           end
 
           def list_models
+            log.info { "discovering models from #{api_base}#{models_url}" }
             super.tap do |models|
+              log.info { "discovered #{models.size} model(s) from vLLM" }
               self.class.registry_publisher.publish_models_async(models, readiness: readiness(live: false))
             end
           end
 
           def version
+            log.info { "fetching version from #{api_base}#{version_url}" }
             connection.get(version_url).body
           end
 
@@ -124,7 +130,8 @@ module Legion
 
             vllm = Legion::Settings.dig(:llm, :providers, :vllm)
             vllm.is_a?(Hash) && (vllm[:enable_thinking] == true || vllm['enable_thinking'] == true)
-          rescue StandardError
+          rescue StandardError => e
+            handle_exception(e, level: :debug, handled: true, operation: 'vllm.thinking_setting')
             false
           end
 
