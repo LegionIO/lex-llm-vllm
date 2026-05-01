@@ -16,7 +16,7 @@ module Legion
             attr_writer :registry_publisher
 
             def slug = 'vllm'
-            def local? = true
+            def local? = false
             def configuration_options = %i[vllm_api_base vllm_api_key]
             def configuration_requirements = []
             def capabilities = Capabilities
