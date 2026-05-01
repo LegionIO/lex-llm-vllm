@@ -6,7 +6,7 @@ module Legion
       module Vllm
         # Best-effort publisher for vLLM provider availability events.
         class RegistryPublisher
-          include Legion::Logging::Helper if defined?(Legion::Logging::Helper)
+          include Legion::Logging::Helper
 
           APP_ID = 'lex-llm-vllm'
 
