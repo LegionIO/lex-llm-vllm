@@ -57,10 +57,6 @@ module Legion
 
           instances
         end
-
-        if Legion::Extensions::Llm::Configuration.respond_to?(:register_provider_options)
-          Legion::Extensions::Llm::Configuration.register_provider_options(Provider.configuration_options)
-        end
       end
     end
   end
