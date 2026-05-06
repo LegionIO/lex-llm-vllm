@@ -83,5 +83,3 @@ module Legion
     end
   end
 end
-
-Legion::Extensions::Llm::Vllm.register_discovered_instances
