@@ -69,9 +69,9 @@ module Legion
 
         def self.normalize_instance_config(config)
           normalized = config.to_h.transform_keys(&:to_sym)
-          if normalized[:base_url] && !normalized[:vllm_api_base]
-            normalized[:vllm_api_base] = normalized.delete(:base_url)
-          end
+          normalized[:vllm_api_base] ||= normalized.delete(:base_url)
+          normalized[:vllm_api_base] ||= normalized.delete(:api_base)
+          normalized[:vllm_api_base] ||= normalized.delete(:endpoint)
           normalized[:vllm_api_base] = normalize_api_base(normalized[:vllm_api_base]) if normalized[:vllm_api_base]
           normalized
         end

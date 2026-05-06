@@ -107,6 +107,13 @@ RSpec.describe Legion::Extensions::Llm::Vllm do
     expect(provider.discover_offerings.map(&:model)).to eq(live_offerings.map(&:model))
   end
 
+  it 'uses provider instance transport and tier in discovered offerings' do
+    configured = described_class::Provider.new(instance_id: :apollo, transport: :rabbitmq, tier: :fleet)
+    offering = configured.send(:offering_from_model, model)
+
+    expect(offering.to_h).to include(instance_id: :apollo, transport: :rabbitmq, tier: :fleet)
+  end
+
   it 'builds sanitized lex-llm registry events for vLLM model availability' do
     events = capture_registry_events([model], readiness: { ready: true })
 
@@ -156,6 +163,15 @@ RSpec.describe Legion::Extensions::Llm::Vllm do
       expect(instances[:apollo]).to include(vllm_api_base: 'http://10.11.164.92:8000',
                                             tier: :direct)
       expect(instances[:apollo]).not_to have_key(:base_url)
+    end
+
+    it 'normalizes endpoint aliases from Legion settings to vllm_api_base' do
+      stub_vllm_settings({ apollo: { endpoint: 'http://10.11.164.92:8000/v1' } })
+      instances = described_class.discover_instances
+
+      expect(instances[:apollo]).to include(vllm_api_base: 'http://10.11.164.92:8000',
+                                            tier: :direct)
+      expect(instances[:apollo]).not_to have_key(:endpoint)
     end
 
     it 'returns both local and configured instances when both are available' do

@@ -128,14 +128,22 @@ module Legion
             Legion::Extensions::Llm::Routing::ModelOffering.new(
               provider_family: :vllm,
               instance_id: config.respond_to?(:instance_id) ? config.instance_id : :default,
-              transport: :http,
-              tier: :direct,
+              transport: offering_transport,
+              tier: offering_tier,
               model: model_info.id,
               usage_type: model_info.embedding? ? :embedding : :inference,
               capabilities: model_info.capabilities.map(&:to_s),
               limits: { context_window: model_info.context_length }.compact,
               metadata: { context_length: model_info.context_length }
             )
+          end
+
+          def offering_transport
+            config.respond_to?(:transport) ? config.transport : :http
+          end
+
+          def offering_tier
+            config.respond_to?(:tier) ? config.tier : :direct
           end
 
           def render_payload(messages, tools:, temperature:, model:, stream:, schema:, thinking:, tool_prefs:) # rubocop:disable Metrics/ParameterLists

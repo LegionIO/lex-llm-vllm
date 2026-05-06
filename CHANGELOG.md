@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.2.6 - 2026-05-06
+
+- Load provider-owned fleet actors through the LegionIO subscription base and the canonical vLLM provider root.
+- Keep fleet runners anchored on the provider root namespace so provider constants and instance discovery are always loaded.
+- Normalize configured `endpoint` and `api_base` aliases to `vllm_api_base`.
+- Preserve configured transport and tier metadata when vLLM builds routing offerings.
+- Gate release publishing on the shared security workflow.
+
 ## 0.2.5 - 2026-05-06
 
 - Mark handled vLLM offering-discovery failures as handled when logging through `Legion::Logging::Helper`.
