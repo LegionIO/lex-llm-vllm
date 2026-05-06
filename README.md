@@ -2,7 +2,7 @@
 
 LegionIO LLM provider extension for [vLLM](https://docs.vllm.ai/).
 
-This gem lives under `Legion::Extensions::Llm::Vllm` and depends on `lex-llm >= 0.4.0` for shared provider-neutral routing, response normalization, fleet envelopes, and schema primitives.
+This gem lives under `Legion::Extensions::Llm::Vllm` and depends on `lex-llm >= 0.4.3` for shared provider-neutral routing, response normalization, fleet envelopes, responder-side fleet execution, and schema primitives.
 
 Load it with `require 'legion/extensions/llm/vllm'`.
 
@@ -19,7 +19,7 @@ Load it with `require 'legion/extensions/llm/vllm'`.
 - vLLM management helpers: `/health`, `/version`, `/reset_prefix_cache`, `/reset_mm_cache`, `/sleep`, `/wake_up`
 - Normalized OpenAI-compatible capability and modality metadata for discovered models
 - Shared fleet/default settings via `Legion::Extensions::Llm.provider_settings`
-- Full `Legion::Logging::Helper` integration with structured `handle_exception` across all classes
+- Structured `Legion::Logging::Helper` handling for provider discovery and fallback paths
 
 ## Defaults
 
@@ -30,10 +30,20 @@ Legion::Extensions::Llm::Vllm.default_settings
 #   instances: {
 #     default: {
 #       endpoint: "http://localhost:8000",
-#       tier: :private,
+#       tier: :direct,
 #       transport: :http,
-#       usage: { inference: true, embedding: true },
-#       limits: { concurrency: 8 }
+#       credentials: { api_key: nil },
+#       enable_thinking: true,
+#       usage: { inference: true, embedding: true, image: true },
+#       limits: { concurrency: 1 },
+#       fleet: {
+#         enabled: false,
+#         respond_to_requests: false,
+#         capabilities: [:chat, :stream_chat, :embed],
+#         lanes: [],
+#         concurrency: 1,
+#         queue_suffix: nil
+#       }
 #     }
 #   }
 # }
@@ -52,7 +62,7 @@ end
 
 ## Fleet Responder
 
-Provider instances can opt in to consuming Legion LLM fleet requests. The provider-owned fleet actor only starts when at least one configured instance enables `respond_to_requests`.
+Provider instances can opt in to consuming Legion LLM fleet requests. The provider-owned fleet actor only starts when at least one configured instance enables `respond_to_requests`, and request execution delegates to `Legion::Extensions::Llm::Fleet::ProviderResponder`.
 
 ```yaml
 extensions:
@@ -106,8 +116,8 @@ Publishing is async (background threads) and never blocks the caller. All failur
 
 ```bash
 bundle install
-bundle exec rspec
-bundle exec rubocop
+bundle exec rspec --format json --out tmp/rspec_results.json --format progress --out tmp/rspec_progress.txt
+bundle exec rubocop -A
 ```
 
 ## License

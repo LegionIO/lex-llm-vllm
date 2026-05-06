@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.2.5 - 2026-05-06
+
+- Mark handled vLLM offering-discovery failures as handled when logging through `Legion::Logging::Helper`.
+- Refresh README dependency, defaults, and local verification guidance for the `lex-llm >= 0.4.3` fleet responder contract.
+
 ## 0.2.4 - 2026-05-06
 
 - Use the shared `lex-llm` fleet provider responder helper for provider-owned fleet workers.

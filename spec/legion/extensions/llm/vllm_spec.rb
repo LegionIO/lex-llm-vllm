@@ -89,6 +89,16 @@ RSpec.describe Legion::Extensions::Llm::Vllm do
     expect(provider).not_to have_received(:list_models)
   end
 
+  it 'marks offering discovery failures handled before falling back' do
+    error = RuntimeError.new('vllm unavailable')
+    allow(provider).to receive(:list_models).and_raise(error)
+    allow(provider).to receive(:handle_exception)
+
+    expect(provider.discover_offerings(live: true)).to eq([])
+    expect(provider).to have_received(:handle_exception)
+      .with(error, level: :warn, handled: true, operation: 'vllm.discover_offerings')
+  end
+
   it 'serves non-live offerings reads from the live discovery cache' do
     stub_model_discovery
     live_offerings = provider.discover_offerings(live: true)

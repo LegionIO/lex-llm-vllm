@@ -96,7 +96,7 @@ module Legion
                      end
             models.map { |model_info| offering_from_model(model_info) }
           rescue StandardError => e
-            handle_exception(e, level: :warn, operation: 'vllm.discover_offerings')
+            handle_exception(e, level: :warn, handled: true, operation: 'vllm.discover_offerings')
             []
           end
 
