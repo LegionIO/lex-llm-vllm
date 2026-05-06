@@ -16,17 +16,26 @@ module Legion
         PROVIDER_FAMILY = :vllm
 
         def self.default_settings
-          {
-            enabled: false,
-            base_url: 'localhost:8000/v1',
-            default_model: nil,
-            enable_thinking: true,
-            model_whitelist: [],
-            model_blacklist: [],
-            model_cache_ttl: 300,
-            tls: { enabled: false, verify: :peer },
-            instances: {}
-          }
+          ::Legion::Extensions::Llm.provider_settings(
+            family: PROVIDER_FAMILY,
+            instance: {
+              endpoint: 'http://localhost:8000',
+              tier: :direct,
+              transport: :http,
+              credentials: { api_key: nil },
+              enable_thinking: true,
+              usage: { inference: true, embedding: true, image: true },
+              limits: { concurrency: 1 },
+              fleet: {
+                enabled: false,
+                respond_to_requests: false,
+                capabilities: %i[chat stream_chat embed],
+                lanes: [],
+                concurrency: 1,
+                queue_suffix: nil
+              }
+            }
+          )
         end
 
         def self.provider_class
@@ -51,11 +60,24 @@ module Legion
           configured = CredentialSources.setting(:extensions, :llm, :vllm, :instances)
           if configured.is_a?(Hash)
             configured.each do |name, config|
-              instances[name.to_sym] = config.merge(tier: :direct)
+              instances[name.to_sym] = normalize_instance_config(config).merge(tier: :direct)
             end
           end
 
           instances
+        end
+
+        def self.normalize_instance_config(config)
+          normalized = config.to_h.transform_keys(&:to_sym)
+          if normalized[:base_url] && !normalized[:vllm_api_base]
+            normalized[:vllm_api_base] = normalized.delete(:base_url)
+          end
+          normalized[:vllm_api_base] = normalize_api_base(normalized[:vllm_api_base]) if normalized[:vllm_api_base]
+          normalized
+        end
+
+        def self.normalize_api_base(url)
+          url.to_s.sub(%r{/v1/?\z}, '')
         end
       end
     end

@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.2.2 - 2026-05-06
+
+- Enforce the shared keyword-only `lex-llm` provider contract and accept `health(live:)`.
+- Move vLLM defaults back to `Legion::Extensions::Llm.provider_settings` with instance-level fleet responder settings.
+- Read vLLM thinking defaults from the nested provider instance settings shape.
+- Serve non-live vLLM offering reads from cached live model discovery instead of probing the configured endpoint.
+- Add provider-owned fleet responder actor and runner backed by `legion-llm` fleet policy execution.
+- Bump the transport dependency floor to `legion-transport >= 1.4.14`.
+
+## 0.2.1 - 2026-05-03
+
+- Normalize configured `base_url` instance settings to `vllm_api_base` so LegionIO local settings are honored during provider registration.
+- Strip a trailing `/v1` from configured vLLM API roots because OpenAI-compatible endpoints append their own `/v1/...` paths.
+
 ## 0.2.0 - 2026-05-01
 
 - Add auto-discovery via CredentialSources and AutoRegistration from lex-llm 0.3.0

@@ -68,8 +68,8 @@ module Legion
           def sleep_url = '/sleep'
           def wake_up_url = '/wake_up'
 
-          def health
-            log.info { "checking health at #{api_base}#{health_url}" }
+          def health(live: false)
+            log.info { "checking health live=#{live} at #{api_base}#{health_url}" }
             connection.get(health_url).body
           end
 
@@ -86,6 +86,18 @@ module Legion
               log.info { "discovered #{models.size} model(s) from vLLM" }
               self.class.registry_publisher.publish_models_async(models, readiness: readiness(live: false))
             end
+          end
+
+          def discover_offerings(live: false, **)
+            models = if live
+                       @cached_models = list_models
+                     else
+                       Array(@cached_models)
+                     end
+            models.map { |model_info| offering_from_model(model_info) }
+          rescue StandardError => e
+            handle_exception(e, level: :warn, operation: 'vllm.discover_offerings')
+            []
           end
 
           def version
@@ -112,6 +124,20 @@ module Legion
 
           private
 
+          def offering_from_model(model_info)
+            Legion::Extensions::Llm::Routing::ModelOffering.new(
+              provider_family: :vllm,
+              instance_id: config.respond_to?(:instance_id) ? config.instance_id : :default,
+              transport: :http,
+              tier: :direct,
+              model: model_info.id,
+              usage_type: model_info.embedding? ? :embedding : :inference,
+              capabilities: model_info.capabilities.map(&:to_s),
+              limits: { context_window: model_info.context_length }.compact,
+              metadata: { context_length: model_info.context_length }
+            )
+          end
+
           def render_payload(messages, tools:, temperature:, model:, stream:, schema:, thinking:, tool_prefs:) # rubocop:disable Metrics/ParameterLists
             payload = super
             payload.delete(:reasoning_effort)
@@ -131,7 +157,12 @@ module Legion
             return false unless defined?(Legion::Settings)
 
             vllm = Legion::Settings.dig(:llm, :providers, :vllm)
-            vllm.is_a?(Hash) && (vllm[:enable_thinking] == true || vllm['enable_thinking'] == true)
+            return false unless vllm.is_a?(Hash)
+
+            vllm[:enable_thinking] == true ||
+              vllm['enable_thinking'] == true ||
+              vllm.dig(:instances, :default, :enable_thinking) == true ||
+              vllm.dig('instances', 'default', 'enable_thinking') == true
           rescue StandardError => e
             handle_exception(e, level: :debug, handled: true, operation: 'vllm.thinking_setting')
             false
