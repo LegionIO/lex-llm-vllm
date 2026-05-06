@@ -9,12 +9,13 @@ RSpec.describe Legion::Extensions::Llm::Vllm do
 
   it 'exposes simple provider defaults with thinking enabled' do
     settings = described_class.default_settings
+    instance = settings.dig(:instances, :default)
 
-    expect(settings[:enabled]).to be false
-    expect(settings[:base_url]).to eq('localhost:8000/v1')
-    expect(settings[:enable_thinking]).to be true
-    expect(settings[:tls]).to eq(enabled: false, verify: :peer)
-    expect(settings[:instances]).to eq({})
+    expect(settings[:enabled]).to be true
+    expect(settings[:provider_family]).to eq(:vllm)
+    expect(instance[:endpoint]).to eq('http://localhost:8000')
+    expect(instance[:enable_thinking]).to be true
+    expect(instance.dig(:fleet, :respond_to_requests)).to be false
   end
 
   it 'does not register on the deprecated Provider.register registry' do
@@ -81,6 +82,38 @@ RSpec.describe Legion::Extensions::Llm::Vllm do
       .with(models, readiness: hash_including(provider: :vllm, live: false))
   end
 
+  it 'does not probe vLLM for uncached non-live offerings reads' do
+    allow(provider).to receive(:list_models).and_raise('unexpected live discovery')
+
+    expect(provider.discover_offerings).to eq([])
+    expect(provider).not_to have_received(:list_models)
+  end
+
+  it 'marks offering discovery failures handled before falling back' do
+    error = RuntimeError.new('vllm unavailable')
+    allow(provider).to receive(:list_models).and_raise(error)
+    allow(provider).to receive(:handle_exception)
+
+    expect(provider.discover_offerings(live: true)).to eq([])
+    expect(provider).to have_received(:handle_exception)
+      .with(error, level: :warn, handled: true, operation: 'vllm.discover_offerings')
+  end
+
+  it 'serves non-live offerings reads from the live discovery cache' do
+    stub_model_discovery
+    live_offerings = provider.discover_offerings(live: true)
+    allow(provider).to receive(:list_models).and_raise('unexpected live discovery')
+
+    expect(provider.discover_offerings.map(&:model)).to eq(live_offerings.map(&:model))
+  end
+
+  it 'uses provider instance transport and tier in discovered offerings' do
+    configured = described_class::Provider.new(instance_id: :apollo, transport: :rabbitmq, tier: :fleet)
+    offering = configured.send(:offering_from_model, model)
+
+    expect(offering.to_h).to include(instance_id: :apollo, transport: :rabbitmq, tier: :fleet)
+  end
+
   it 'builds sanitized lex-llm registry events for vLLM model availability' do
     events = capture_registry_events([model], readiness: { ready: true })
 
@@ -121,6 +154,24 @@ RSpec.describe Legion::Extensions::Llm::Vllm do
       instances = described_class.discover_instances
 
       expect(instances[:gpu_cluster]).to eq(vllm_api_base: 'http://gpu-node:8000', tier: :direct)
+    end
+
+    it 'normalizes base_url from Legion settings to vllm_api_base' do
+      stub_vllm_settings({ apollo: { base_url: 'http://10.11.164.92:8000/v1' } })
+      instances = described_class.discover_instances
+
+      expect(instances[:apollo]).to include(vllm_api_base: 'http://10.11.164.92:8000',
+                                            tier: :direct)
+      expect(instances[:apollo]).not_to have_key(:base_url)
+    end
+
+    it 'normalizes endpoint aliases from Legion settings to vllm_api_base' do
+      stub_vllm_settings({ apollo: { endpoint: 'http://10.11.164.92:8000/v1' } })
+      instances = described_class.discover_instances
+
+      expect(instances[:apollo]).to include(vllm_api_base: 'http://10.11.164.92:8000',
+                                            tier: :direct)
+      expect(instances[:apollo]).not_to have_key(:endpoint)
     end
 
     it 'returns both local and configured instances when both are available' do
