@@ -195,6 +195,33 @@ RSpec.describe Legion::Extensions::Llm::Vllm do
 
       expect(described_class.discover_instances).to eq({})
     end
+
+    it 'preserves explicit tier from configured instance settings' do
+      stub_vllm_settings({ edge: { vllm_api_base: 'http://edge-node:8000', tier: :fleet } })
+      instances = described_class.discover_instances
+
+      expect(instances[:edge][:tier]).to eq(:fleet)
+    end
+  end
+
+  describe '.normalize_instance_config' do
+    it 'infers tier :local for a localhost endpoint' do
+      result = described_class.normalize_instance_config(vllm_api_base: 'http://localhost:8000')
+
+      expect(result[:tier]).to eq(:local)
+    end
+
+    it 'infers tier :direct for a remote IP endpoint' do
+      result = described_class.normalize_instance_config(vllm_api_base: 'http://10.0.1.50:8000')
+
+      expect(result[:tier]).to eq(:direct)
+    end
+
+    it 'preserves explicit tier :fleet when provided in config' do
+      result = described_class.normalize_instance_config(vllm_api_base: 'http://localhost:8000', tier: :fleet)
+
+      expect(result[:tier]).to eq(:fleet)
+    end
   end
 
   def management_urls

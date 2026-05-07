@@ -14,6 +14,7 @@ module Legion
         extend Legion::Extensions::Llm::AutoRegistration
 
         PROVIDER_FAMILY = :vllm
+        DEFAULT_INSTANCE_TIER = { tier: :direct }.freeze
 
         def self.default_settings
           ::Legion::Extensions::Llm.provider_settings(
@@ -60,7 +61,7 @@ module Legion
           configured = CredentialSources.setting(:extensions, :llm, :vllm, :instances)
           if configured.is_a?(Hash)
             configured.each do |name, config|
-              instances[name.to_sym] = normalize_instance_config(config).merge(tier: :direct)
+              instances[name.to_sym] = DEFAULT_INSTANCE_TIER.merge(normalize_instance_config(config))
             end
           end
 
@@ -69,15 +70,30 @@ module Legion
 
         def self.normalize_instance_config(config)
           normalized = config.to_h.transform_keys(&:to_sym)
+          resolve_api_base_aliases(normalized)
+          normalized[:tier] ||= infer_tier_from_endpoint(normalized[:vllm_api_base])
+          normalized
+        end
+
+        def self.resolve_api_base_aliases(normalized)
           normalized[:vllm_api_base] ||= normalized.delete(:base_url)
           normalized[:vllm_api_base] ||= normalized.delete(:api_base)
           normalized[:vllm_api_base] ||= normalized.delete(:endpoint)
           normalized[:vllm_api_base] = normalize_api_base(normalized[:vllm_api_base]) if normalized[:vllm_api_base]
-          normalized
         end
 
         def self.normalize_api_base(url)
           url.to_s.sub(%r{/v1/?\z}, '')
+        end
+
+        def self.infer_tier_from_endpoint(url)
+          return :direct if url.nil? || url.to_s.empty?
+
+          require 'uri'
+          host = URI.parse(url.to_s).host.to_s.downcase
+          %w[localhost 127.0.0.1 ::1].include?(host) ? :local : :direct
+        rescue URI::InvalidURIError
+          :direct
         end
       end
     end

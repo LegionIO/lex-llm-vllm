@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.2.7 - 2026-05-07
+
+- Fix merge order in `discover_instances` so a user-supplied `tier:` in instance config is no longer clobbered by the `:direct` default.
+- Infer instance tier from endpoint URL in `normalize_instance_config`: `localhost`/`127.0.0.1`/`::1` → `:local`, any other host → `:direct`. Explicit `tier:` in config still wins.
+
 ## 0.2.6 - 2026-05-06
 
 - Load provider-owned fleet actors through the LegionIO subscription base and the canonical vLLM provider root.
