@@ -45,6 +45,16 @@ RSpec.describe Legion::Extensions::Llm::Vllm do
     expect(payload[:messages]).to eq([{ role: 'user', content: 'hello' }])
   end
 
+  it 'uses provider instance thinking settings when rendering chat payloads' do
+    configured = described_class::Provider.new(vllm_api_base: 'http://localhost:8000', enable_thinking: true)
+    message = Legion::Extensions::Llm::Message.new(role: :user, content: 'hello')
+
+    payload = configured.send(:render_payload, [message], tools: {}, temperature: 0.2, model: model, stream: false,
+                                                          schema: nil, thinking: nil, tool_prefs: nil)
+
+    expect(payload[:chat_template_kwargs]).to eq(enable_thinking: true)
+  end
+
   it 'uses an optional bearer token when configured' do
     original = Legion::Extensions::Llm.config.vllm_api_key
     Legion::Extensions::Llm.config.vllm_api_key = 'token-abc123'
