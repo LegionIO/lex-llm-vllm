@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.2.8 - 2026-05-07
+
+- Read vLLM thinking defaults from the active provider instance config so per-instance `enable_thinking` settings affect chat payloads.
+
 ## 0.2.7 - 2026-05-07
 
 - Fix merge order in `discover_instances` so a user-supplied `tier:` in instance config is no longer clobbered by the `:direct` default.

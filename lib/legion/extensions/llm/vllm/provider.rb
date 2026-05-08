@@ -162,18 +162,25 @@ module Legion
           end
 
           def vllm_thinking_setting
+            instance_thinking_enabled? || global_thinking_enabled?
+          rescue StandardError => e
+            handle_exception(e, level: :debug, handled: true, operation: 'vllm.thinking_setting')
+            false
+          end
+
+          def instance_thinking_enabled?
+            return config.enable_thinking if config.respond_to?(:enable_thinking)
+
+            config.respond_to?(:[]) && config[:enable_thinking] == true
+          end
+
+          def global_thinking_enabled?
             return false unless defined?(Legion::Settings)
 
             vllm = Legion::Settings.dig(:llm, :providers, :vllm)
             return false unless vllm.is_a?(Hash)
 
-            vllm[:enable_thinking] == true ||
-              vllm['enable_thinking'] == true ||
-              vllm.dig(:instances, :default, :enable_thinking) == true ||
-              vllm.dig('instances', 'default', 'enable_thinking') == true
-          rescue StandardError => e
-            handle_exception(e, level: :debug, handled: true, operation: 'vllm.thinking_setting')
-            false
+            vllm[:enable_thinking] == true || vllm['enable_thinking'] == true
           end
 
           def parse_list_models_response(response, provider, capabilities)
