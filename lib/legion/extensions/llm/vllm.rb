@@ -3,6 +3,7 @@
 require 'legion/extensions/llm'
 require 'legion/extensions/llm/vllm/provider'
 require 'legion/extensions/llm/vllm/version'
+require 'legion/logging'
 
 module Legion
   module Extensions
@@ -65,6 +66,7 @@ module Legion
             end
           end
 
+          log.debug { "discovered #{instances.size} vLLM instance(s): #{instances.keys.join(', ')}" }
           instances
         end
 
@@ -92,7 +94,8 @@ module Legion
           require 'uri'
           host = URI.parse(url.to_s).host.to_s.downcase
           %w[localhost 127.0.0.1 ::1].include?(host) ? :local : :direct
-        rescue URI::InvalidURIError
+        rescue URI::InvalidURIError => e
+          handle_exception(e, level: :debug, handled: true, operation: 'vllm.infer_tier_from_endpoint')
           :direct
         end
       end

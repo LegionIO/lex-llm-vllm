@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 require 'legion/extensions/llm'
+require 'legion/logging'
 require 'uri'
 
 module Legion
@@ -94,7 +95,9 @@ module Legion
                      else
                        Array(@cached_models)
                      end
-            models.map { |model_info| offering_from_model(model_info) }
+            models.map { |model_info| offering_from_model(model_info) }.tap do |offerings|
+              log.debug { "built #{offerings.size} vLLM offering(s) live=#{live}" }
+            end
           rescue StandardError => e
             handle_exception(e, level: :warn, handled: true, operation: 'vllm.discover_offerings')
             []
@@ -106,18 +109,25 @@ module Legion
           end
 
           def reset_prefix_cache(reset_running_requests: nil, reset_external: nil)
+            log.debug do
+              "resetting vLLM prefix cache reset_running_requests=#{reset_running_requests.inspect} " \
+                "reset_external=#{reset_external.inspect}"
+            end
             connection.post(with_query(reset_prefix_cache_url, reset_running_requests:, reset_external:), {}).body
           end
 
           def reset_mm_cache
+            log.debug { 'resetting vLLM multimodal cache' }
             connection.post(reset_mm_cache_url, {}).body
           end
 
           def sleep(level: 1)
+            log.debug { "putting vLLM worker to sleep level=#{level.inspect}" }
             connection.post(with_query(sleep_url, level:), {}).body
           end
 
           def wake_up(tags: nil)
+            log.debug { "waking vLLM worker tags=#{Array(tags).inspect}" }
             query = Array(tags).map { |tag| ['tags', tag] }
             connection.post(with_query(wake_up_url, query), {}).body
           end
@@ -150,6 +160,10 @@ module Legion
             payload = super
             payload.delete(:reasoning_effort)
             payload[:chat_template_kwargs] = { enable_thinking: true } if thinking_enabled?(thinking)
+            log.debug do
+              "rendered vLLM payload model=#{model.respond_to?(:id) ? model.id : model} stream=#{stream} " \
+                "tools=#{tools.respond_to?(:size) ? tools.size : 0} thinking=#{payload.key?(:chat_template_kwargs)}"
+            end
             payload
           end
 

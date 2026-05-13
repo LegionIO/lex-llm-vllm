@@ -26,6 +26,11 @@ RSpec.describe Legion::Extensions::Llm::Vllm do
     expect(described_class::Provider.ancestors).to include(Legion::Extensions::Llm::Provider::OpenAICompatible)
   end
 
+  it 'uses Legion logging helpers for provider and root logging' do
+    expect(described_class.singleton_class.ancestors).to include(Legion::Logging::Helper)
+    expect(described_class::Provider.ancestors).to include(Legion::Logging::Helper)
+  end
+
   it 'exposes OpenAI-compatible base endpoint helpers' do
     expect([provider.api_base, provider.completion_url, provider.models_url, provider.embedding_url])
       .to eq(['http://localhost:8000', '/v1/chat/completions', '/v1/models', '/v1/embeddings'])
@@ -231,6 +236,17 @@ RSpec.describe Legion::Extensions::Llm::Vllm do
       result = described_class.normalize_instance_config(vllm_api_base: 'http://localhost:8000', tier: :fleet)
 
       expect(result[:tier]).to eq(:fleet)
+    end
+
+    it 'logs invalid endpoint tier inference through the helper and falls back to direct' do
+      allow(described_class).to receive(:handle_exception)
+
+      result = described_class.normalize_instance_config(vllm_api_base: '://not-a-url')
+
+      expect(result[:tier]).to eq(:direct)
+      expect(described_class).to have_received(:handle_exception)
+        .with(instance_of(URI::InvalidURIError), level: :debug, handled: true,
+                                                 operation: 'vllm.infer_tier_from_endpoint')
     end
   end
 

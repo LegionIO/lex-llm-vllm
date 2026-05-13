@@ -13,6 +13,10 @@ RSpec.describe Legion::Extensions::Llm::Vllm::Runners::FleetWorker do
   let(:properties) { instance_double(FleetWorkerSpecProperties) }
   let(:instances) { { local: { fleet: { respond_to_requests: true } } } }
 
+  it 'uses Legion logging helpers for runner logging' do
+    expect(described_class.singleton_class.ancestors).to include(Legion::Logging::Helper)
+  end
+
   it 'delegates fleet execution to the shared lex-llm responder helper' do # rubocop:disable RSpec/ExampleLength
     allow(Legion::Extensions::Llm::Vllm).to receive(:discover_instances).and_return(instances)
     allow(Legion::Extensions::Llm::Fleet::ProviderResponder).to receive(:call).and_return(:ok)

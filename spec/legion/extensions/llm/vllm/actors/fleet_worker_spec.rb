@@ -19,6 +19,10 @@ require 'legion/extensions/llm/vllm/actors/fleet_worker'
 RSpec.describe Legion::Extensions::Llm::Vllm::Actor::FleetWorker do # rubocop:disable RSpec/SpecFilePathFormat
   subject(:actor) { described_class.new }
 
+  it 'uses Legion logging helpers for actor logging' do
+    expect(described_class.ancestors).to include(Legion::Logging::Helper)
+  end
+
   it 'uses the provider-owned fleet runner' do
     expect(actor.runner_class).to eq('Legion::Extensions::Llm::Vllm::Runners::FleetWorker')
     expect(actor.runner_function).to eq('handle_fleet_request')
