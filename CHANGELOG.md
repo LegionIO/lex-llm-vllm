@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.2.10 - 2026-05-13
+
+- Add `fetch_model_detail` to re-fetch `/v1/models` for `context_window` on a cache miss.
+- Pre-warm the model detail cache during offering discovery via `cache_set` using `model_detail_cache_key`.
+
 ## 0.2.9 - 2026-05-12
 
 - Route fleet actor load failures through `Legion::Logging::Helper` instead of direct warnings.

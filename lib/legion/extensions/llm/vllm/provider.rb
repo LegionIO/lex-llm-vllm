@@ -132,9 +132,28 @@ module Legion
             connection.post(with_query(wake_up_url, query), {}).body
           end
 
+          def fetch_model_detail(model_name)
+            # vLLM provides context_length via /v1/models during discovery.
+            # Re-fetch from the models endpoint if we need it outside discovery.
+            response = @connection.get(models_url)
+            models = response.body.fetch('data', [])
+            entry = models.find { |m| m['id'] == model_name.to_s }
+            return nil unless entry
+
+            ctx = entry['max_model_len']
+            ctx ? { context_window: ctx } : nil
+          rescue StandardError => e
+            handle_exception(e, level: :warn, handled: true, operation: 'vllm.fetch_model_detail',
+                                model: model_name)
+            nil
+          end
+
           private
 
           def offering_from_model(model_info)
+            ctx = model_info.context_length
+            cache_set(model_detail_cache_key(model_info.id), { context_window: ctx }, ttl: 86_400) if ctx
+
             Legion::Extensions::Llm::Routing::ModelOffering.new(
               provider_family: :vllm,
               instance_id: config.respond_to?(:instance_id) ? config.instance_id : :default,
@@ -143,8 +162,8 @@ module Legion
               model: model_info.id,
               usage_type: model_info.embedding? ? :embedding : :inference,
               capabilities: model_info.capabilities.map(&:to_s),
-              limits: { context_window: model_info.context_length }.compact,
-              metadata: { context_length: model_info.context_length }
+              limits: { context_window: ctx }.compact,
+              metadata: { context_length: ctx }
             )
           end
 
