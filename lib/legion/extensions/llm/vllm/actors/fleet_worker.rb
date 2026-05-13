@@ -3,7 +3,11 @@
 begin
   require 'legion/extensions/actors/subscription'
 rescue LoadError => e
-  warn(e.message) if $VERBOSE
+  require 'legion/extensions/llm/vllm'
+  unless defined?(Legion::Extensions::Actors::Subscription)
+    Legion::Extensions::Llm::Vllm.handle_exception(e, level: :warn, handled: false,
+                                                      operation: 'vllm.fleet_worker.load_actor_runtime')
+  end
 end
 
 unless defined?(Legion::Extensions::Actors::Subscription)
@@ -12,6 +16,7 @@ end
 
 require 'legion/extensions/llm/vllm'
 require 'legion/extensions/llm/fleet/provider_responder'
+require 'legion/logging'
 
 module Legion
   module Extensions
@@ -20,6 +25,8 @@ module Legion
         module Actor
           # Subscription actor for vLLM fleet request consumption.
           class FleetWorker < Legion::Extensions::Actors::Subscription
+            include Legion::Logging::Helper
+
             def runner_class
               'Legion::Extensions::Llm::Vllm::Runners::FleetWorker'
             end
@@ -33,7 +40,9 @@ module Legion
             end
 
             def enabled?
-              Legion::Extensions::Llm::Fleet::ProviderResponder.enabled_for?(Vllm.discover_instances)
+              Legion::Extensions::Llm::Fleet::ProviderResponder.enabled_for?(Vllm.discover_instances).tap do |enabled|
+                log.debug { "vLLM fleet worker enabled=#{enabled}" }
+              end
             end
           end
         end

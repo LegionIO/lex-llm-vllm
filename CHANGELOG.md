@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.2.9 - 2026-05-12
+
+- Route fleet actor load failures through `Legion::Logging::Helper` instead of direct warnings.
+- Add debug logging around vLLM instance discovery, fleet worker dispatch, offering construction, payload rendering, and management endpoints.
+
 ## 0.2.8 - 2026-05-07
 
 - Read vLLM thinking defaults from the active provider instance config so per-instance `enable_thinking` settings affect chat payloads.
