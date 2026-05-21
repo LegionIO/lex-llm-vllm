@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.2.11 - 2026-05-21
+
+- Add `default_transport`/`default_tier` class declarations, remove duplicate instance methods
+- Add `model_allowed?` filtering in `discover_offerings`
+- Identity headers included via base provider
+- api_base reads from settings[:endpoint] fallback
+
+
 ## 0.2.10 - 2026-05-13
 
 - Add `fetch_model_detail` to re-fetch `/v1/models` for `context_window` on a cache miss.
