@@ -16,6 +16,8 @@ module Legion
           class << self
             def slug = 'vllm'
             def local? = false
+            def default_transport = :http
+            def default_tier = :direct
             def configuration_options = %i[vllm_api_base vllm_api_key]
             def configuration_requirements = []
             def capabilities = Capabilities
@@ -52,14 +54,14 @@ module Legion
           end
 
           def api_base
-            normalize_url(config.vllm_api_base || 'localhost:8000')
+            normalize_url(config.vllm_api_base || settings[:endpoint] || 'http://localhost:8000')
           end
 
           def headers
+            hdrs = identity_headers
             token = config.vllm_api_key
-            return {} if token.nil? || token.to_s.empty?
-
-            { 'Authorization' => "Bearer #{token}" }
+            hdrs['Authorization'] = "Bearer #{token}" unless token.nil? || token.to_s.empty?
+            hdrs
           end
 
           def health_url = '/health'
@@ -95,9 +97,13 @@ module Legion
                      else
                        Array(@cached_models)
                      end
-            models.map { |model_info| offering_from_model(model_info) }.tap do |offerings|
-              log.debug { "built #{offerings.size} vLLM offering(s) live=#{live}" }
+            offerings = models.filter_map do |model_info|
+              next unless model_allowed?(model_info.id)
+
+              offering_from_model(model_info)
             end
+            log.debug { "built #{offerings.size} vLLM offering(s) live=#{live}" }
+            offerings
           rescue StandardError => e
             handle_exception(e, level: :warn, handled: true, operation: 'vllm.discover_offerings')
             []
@@ -165,14 +171,6 @@ module Legion
               limits: { context_window: ctx }.compact,
               metadata: { context_length: ctx }
             )
-          end
-
-          def offering_transport
-            config.respond_to?(:transport) ? config.transport : :http
-          end
-
-          def offering_tier
-            config.respond_to?(:tier) ? config.tier : :direct
           end
 
           def render_payload(messages, tools:, temperature:, model:, stream:, schema:, thinking:, tool_prefs:) # rubocop:disable Metrics/ParameterLists
