@@ -168,7 +168,8 @@ RSpec.describe Legion::Extensions::Llm::Vllm do
       stub_vllm_settings({ gpu_cluster: { vllm_api_base: 'http://gpu-node:8000' } })
       instances = described_class.discover_instances
 
-      expect(instances[:gpu_cluster]).to eq(vllm_api_base: 'http://gpu-node:8000', tier: :direct)
+      expect(instances[:gpu_cluster]).to eq(vllm_api_base: 'http://gpu-node:8000', tier: :direct,
+                                            capabilities: %i[completion streaming vision tools])
     end
 
     it 'normalizes base_url from Legion settings to vllm_api_base' do

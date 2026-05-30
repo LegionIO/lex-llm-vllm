@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.2.12 - 2026-05-29
+
+- Add capabilities `[:completion, :streaming, :vision, :tools]` to `DEFAULT_INSTANCE_TIER` so routing can match vLLM instances by required capability without live discovery
+
 ## 0.2.11 - 2026-05-21
 
 - Add `default_transport`/`default_tier` class declarations, remove duplicate instance methods
