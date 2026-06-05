@@ -10,6 +10,7 @@ require 'legion/extensions/llm'
   Legion::Extensions::Llm::Configuration.send(:option, opt, nil)
 end
 
+require 'legion/extensions/llm'
 require 'legion/extensions/llm/vllm'
 
 if defined?(Legion::Logging)
