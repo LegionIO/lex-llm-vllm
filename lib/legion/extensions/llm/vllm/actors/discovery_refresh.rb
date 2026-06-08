@@ -13,6 +13,7 @@ module Legion
     module Llm
       module Vllm
         module Actor
+          # Periodic actor that refreshes the vLLM discovered model list.
           class DiscoveryRefresh < Legion::Extensions::Actors::Every
             include Legion::Logging::Helper
 

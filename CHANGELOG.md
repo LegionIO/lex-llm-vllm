@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.2.13 - 2026-06-05
+
+- Fix missing documentation comment on `DiscoveryRefresh` actor (RuboCop Style/Documentation)
+
 ## 0.2.12 - 2026-05-29
 
 - Add capabilities `[:completion, :streaming, :vision, :tools]` to `DEFAULT_INSTANCE_TIER` so routing can match vLLM instances by required capability without live discovery
