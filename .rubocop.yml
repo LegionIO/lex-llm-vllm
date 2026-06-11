@@ -21,3 +21,12 @@ RSpec/ExampleLength:
   Max: 8
 RSpec/MultipleExpectations:
   Enabled: false
+
+RSpec/ExampleLength:
+  Max: 10
+
+
+Layout/LineLength:
+  Exclude:
+    - spec/**/*
+

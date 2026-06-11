@@ -53,6 +53,11 @@ module Legion
             Vllm.default_settings
           end
 
+          # Canonical translator instance — renders requests, parses responses/chunks.
+          def translator
+            @translator ||= Translator.new(config: config)
+          end
+
           def api_base
             normalize_url(config.vllm_api_base || settings[:endpoint] || 'http://localhost:8000')
           end
@@ -173,15 +178,159 @@ module Legion
             )
           end
 
-          def render_payload(messages, tools:, temperature:, model:, stream:, schema:, thinking:, tool_prefs:) # rubocop:disable Metrics/ParameterLists
-            payload = super
-            payload.delete(:reasoning_effort)
-            payload[:chat_template_kwargs] = { enable_thinking: true } if thinking_enabled?(thinking)
-            log.debug do
-              "rendered vLLM payload model=#{model.respond_to?(:id) ? model.id : model} stream=#{stream} " \
-                "tools=#{tools.respond_to?(:size) ? tools.size : 0} thinking=#{payload.key?(:chat_template_kwargs)}"
+          # ── Canonical bridge: legacy provider API → Canonical::Request ──
+
+          # rubocop:disable Metrics/ParameterLists, Metrics/AbcSize, Metrics/CyclomaticComplexity, Metrics/PerceivedComplexity -- bridge method can be complex
+          def build_canonical_request(
+            messages:, tools:, temperature:, model:, stream:, schema:, thinking:, tool_prefs:
+          )
+            model_id = model.respond_to?(:id) ? model.id : model.to_s
+
+            canonical_messages = messages.filter_map do |msg|
+              Canonical::Message.from_hash(msg.to_h) if msg.respond_to?(:to_h)
             end
-            payload
+
+            canonical_tools = tools.to_h.transform_values do |tool|
+              if tool.is_a?(Canonical::ToolDefinition)
+                tool
+              else
+                Canonical::ToolDefinition.from_hash(tool.respond_to?(:to_h) ? tool.to_h : tool)
+              end
+            end
+
+            params_hash = { temperature: temperature }
+            params_hash[:response_format] = schema if schema
+            canonical_params = Canonical::Params.from_hash(params_hash)
+
+            canonical_thinking = if thinking.respond_to?(:enabled?) && thinking.enabled?
+                                   Canonical::Thinking::Config.new(
+                                     effort: thinking.respond_to?(:effort) ? thinking.effort : nil
+                                   )
+                                 elsif thinking.is_a?(Hash)
+                                   Canonical::Thinking::Config.new(
+                                     effort: thinking[:effort] || thinking['effort'],
+                                     budget: thinking[:budget] || thinking['budget']
+                                   )
+                                 end
+
+            # Tool choice from tool_prefs
+            tool_choice = format_tool_choice_from_prefs(tool_prefs)
+
+            Canonical::Request.build(
+              messages: canonical_messages,
+              system: extract_system_prompt(messages),
+              tools: canonical_tools,
+              tool_choice: tool_choice,
+              params: canonical_params,
+              thinking: canonical_thinking,
+              stream: stream,
+              metadata: { model: model_id }
+            )
+          end
+          # rubocop:enable Metrics/ParameterLists, Metrics/AbcSize, Metrics/CyclomaticComplexity, Metrics/PerceivedComplexity
+
+          # ── Canonical bridge: Canonical→legacy Message/Chunk ──
+
+          # rubocop:disable Metrics/AbcSize, Metrics/CyclomaticComplexity, Metrics/PerceivedComplexity -- verbose bridge
+          def to_legacy_message(canonical, raw_body, _raw_response)
+            thinking = nil
+            if canonical.thinking
+              thinking = Thinking.build(
+                text: canonical.thinking.content,
+                signature: canonical.thinking.signature
+              )
+            end
+
+            tool_calls = {}
+            canonical.tool_calls.each do |tc|
+              key = (tc.name || tc.id).to_s.to_sym
+              tool_calls[key] = Legion::Extensions::Llm::ToolCall.new(
+                id: tc.id,
+                name: tc.name,
+                arguments: tc.arguments
+              )
+            end
+
+            usage = canonical.usage || {}
+
+            Legion::Extensions::Llm::Message.new(
+              role: :assistant,
+              content: canonical.text,
+              model_id: canonical.model,
+              tool_calls: tool_calls.empty? ? nil : tool_calls,
+              thinking: thinking,
+              input_tokens: usage.respond_to?(:input_tokens) ? usage.input_tokens : nil,
+              output_tokens: usage.respond_to?(:output_tokens) ? usage.output_tokens : nil,
+              reasoning_tokens: usage.respond_to?(:thinking_tokens) ? usage.thinking_tokens : nil,
+              raw: raw_body
+            )
+          end
+          # rubocop:enable Metrics/AbcSize, Metrics/CyclomaticComplexity, Metrics/PerceivedComplexity
+
+          def to_legacy_chunk(canonical, raw_data)
+            usage = canonical&.usage || {}
+
+            content = canonical.delta
+            thinking = nil
+            if canonical.type == :thinking_delta
+              thinking = Thinking.build(text: canonical.delta)
+              content = nil
+            end
+
+            Legion::Extensions::Llm::Chunk.new(
+              role: :assistant,
+              content: content,
+              model_id: raw_data['model'],
+              tool_calls: nil,
+              thinking: thinking,
+              input_tokens: usage.respond_to?(:input_tokens) ? usage.input_tokens : nil,
+              output_tokens: usage.respond_to?(:output_tokens) ? usage.output_tokens : nil,
+              raw: raw_data
+            )
+          end
+
+          # ── Tool choice helpers ──
+
+          def format_tool_choice_from_prefs(tool_prefs)
+            return nil unless tool_prefs
+
+            choice = tool_prefs[:choice] || tool_prefs['choice']
+            return nil unless choice
+            return choice.to_sym if %w[auto none required].include?(choice.to_s)
+
+            { name: choice.to_s }
+          end
+
+          # rubocop:disable Metrics/CyclomaticComplexity, Metrics/PerceivedComplexity -- multibranch guard chain for system parsing
+          def extract_system_prompt(messages)
+            return nil unless messages.is_a?(Array)
+            return nil if messages.empty?
+
+            first = messages.first
+            return nil unless first
+
+            role = first.respond_to?(:role) ? first.role.to_sym : (first[:role] || first['role'])
+            return nil unless [:system, 'system'].include?(role)
+
+            content = first.respond_to?(:content) ? first.content : (first[:content] || first['content'])
+            content.is_a?(String) ? content : nil
+          end
+          # rubocop:enable Metrics/CyclomaticComplexity, Metrics/PerceivedComplexity
+
+          def render_payload(messages, tools:, temperature:, model:, stream:, schema:, thinking:, tool_prefs:) # rubocop:disable Metrics/ParameterLists
+            # Build a canonical request from provider call parameters,
+            # then delegate to the translator for wire-format rendering.
+            canonical_req = build_canonical_request(
+              messages:, tools:, temperature:, model:, stream:,
+              schema:, thinking:, tool_prefs:
+            )
+            wire = translator.render_request(canonical_req)
+
+            log.debug do
+              "vLLM provider rendered wire payload model=#{wire[:model]} stream=#{wire[:stream]} " \
+                "messages=#{(wire[:messages] || []).size} keys=#{wire.keys.join(', ')}"
+            end
+            wire
           end
 
           def thinking_enabled?(thinking)
@@ -212,6 +361,24 @@ module Legion
             return false unless vllm.is_a?(Hash)
 
             vllm[:enable_thinking] == true || vllm['enable_thinking'] == true
+          end
+
+          # Override: delegate completion response parsing to the canonical translator.
+          def parse_completion_response(response)
+            body = response.body
+            canonical = translator.parse_response(body)
+
+            # Convert Canonical::Response back to the legacy Message/Chunk shape
+            # that the Provider base class expects (backward compat with existing callers).
+            to_legacy_message(canonical, body, response)
+          end
+
+          # Override: delegate SSE chunk parsing to the canonical translator.
+          def build_chunk(data)
+            canonical_chunk = translator.parse_chunk(data)
+            return nil if canonical_chunk.nil?
+
+            to_legacy_chunk(canonical_chunk, data)
           end
 
           def parse_list_models_response(response, provider, capabilities)
