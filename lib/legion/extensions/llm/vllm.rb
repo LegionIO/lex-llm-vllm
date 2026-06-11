@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 require 'legion/extensions/llm'
+require 'legion/extensions/llm/vllm/translator'
 require 'legion/extensions/llm/vllm/provider'
 require 'legion/extensions/llm/vllm/version'
 require 'legion/logging'

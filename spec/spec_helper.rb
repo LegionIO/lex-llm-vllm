@@ -12,6 +12,13 @@ end
 
 require 'legion/extensions/llm/vllm'
 
+# Load conformance kit from lex-llm gem's spec/ directory
+# (spec/ ships in the gem but is NOT on the load path)
+if Gem.loaded_specs['lex-llm']
+  kit_path = File.join(Gem.loaded_specs['lex-llm'].full_gem_path, 'spec/legion/extensions/llm/conformance')
+  Dir[File.join(kit_path, '**', '*.rb')].each { |f| require f }
+end
+
 if defined?(Legion::Logging)
   null_logger = Logger.new(File::NULL)
   null_logger.level = Logger::DEBUG
