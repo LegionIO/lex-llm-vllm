@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.3.0 - 2026-06-10
+
+- Add canonical provider translator (`Translator`) implementing `render_request`,
+  `parse_response`, `parse_chunk`, and `capabilities` per N×N routing design
+- Wire provider `render_payload`, `parse_completion_response`, `build_chunk` to
+  delegate to translator with legacy Message/Chunk bridge for backward compat
+- Declare vLLM quirks: `tool_calls_as_text`, `forced_tool_choice`, `thinking_tags`,
+  `streaming_token_usage`
+- G18 parameter mapping: max_tokens, temperature, top_p, top_k, stop_sequences,
+  seed, frequency_penalty, presence_penalty, response_format
+- Qwen-style </think> tag extraction and tool-call synthesis from content text
+- Adopt conformance kit (`it_behaves_like 'a canonical provider translator'`)
+- Bump lex-llm dependency floor to >= 0.5.0
+
 ## 0.2.13 - 2026-06-05
 
 - Fix missing documentation comment on `DiscoveryRefresh` actor (RuboCop Style/Documentation)
