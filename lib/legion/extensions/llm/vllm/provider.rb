@@ -281,12 +281,30 @@ module Legion
               role: :assistant,
               content: content,
               model_id: raw_data['model'],
-              tool_calls: nil,
+              tool_calls: legacy_chunk_tool_calls(canonical),
               thinking: thinking,
               input_tokens: usage.respond_to?(:input_tokens) ? usage.input_tokens : nil,
               output_tokens: usage.respond_to?(:output_tokens) ? usage.output_tokens : nil,
               raw: raw_data
             )
+          end
+
+          # Map a canonical tool_call_delta onto the legacy chunk tool_calls hash.
+          # Fragment semantics matter: an entry with a non-nil id starts a new tool
+          # call in the StreamAccumulator; a nil id appends the raw arguments
+          # fragment to the most recently started call.
+          def legacy_chunk_tool_calls(canonical)
+            return nil unless canonical.type == :tool_call_delta && canonical.tool_call
+
+            tc = canonical.tool_call
+            key = (tc.id || tc.name || :fragment).to_s.to_sym
+            {
+              key => Legion::Extensions::Llm::ToolCall.new(
+                id: tc.id,
+                name: tc.name,
+                arguments: tc.arguments
+              )
+            }
           end
 
           # ── Tool choice helpers ──

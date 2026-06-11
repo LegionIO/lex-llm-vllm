@@ -164,24 +164,8 @@ module Legion
               )
             end
 
-            tool_calls = delta['tool_calls']
-            unless Array(tool_calls).empty?
-              first_call = tool_calls.first
-              function = first_call.fetch('function', {})
-
-              tc = Canonical::ToolCall.build(
-                id: (first_call['id'] || function['name'] || 'synthesized').to_s,
-                name: function['name'].to_s,
-                arguments: parse_tool_arguments(function['arguments']),
-                source: :client
-              )
-
-              return Canonical::Chunk.tool_call_delta(
-                tool_call: tc,
-                request_id: request_id,
-                block_index: first_call['index']
-              )
-            end
+            tool_calls = Array(delta['tool_calls'])
+            return build_tool_call_delta_chunk(tool_calls.first, request_id) unless tool_calls.empty?
 
             # Thinking delta from reasoning_content
             reasoning_content = delta['reasoning_content'] || delta['reasoning']
@@ -227,7 +211,8 @@ module Legion
           # ── Message formatting ──
 
           def format_messages(request)
-            messages = format_request_messages(request.messages)
+            non_system = request.messages&.reject { |m| m.role.to_s == 'system' } || []
+            messages = format_request_messages(non_system)
 
             if request.system.to_s.strip.empty?
               messages
@@ -633,26 +618,48 @@ module Legion
             )
           end
 
+          # Build a tool_call_delta chunk preserving OpenAI streaming fragment
+          # semantics: the opening fragment carries id + name; continuation
+          # fragments carry id: nil and a raw partial-JSON arguments string.
+          # The StreamAccumulator keys off a nil id to append fragments to the
+          # current tool call, so the id must NOT be synthesized here.
+          def build_tool_call_delta_chunk(first_call, request_id)
+            function = first_call.fetch('function', {})
+
+            tc = Canonical::ToolCall.new(
+              id: first_call['id'], exchange_id: nil,
+              name: function['name'], arguments: function['arguments'].to_s,
+              source: :client, status: nil, duration_ms: nil, result: nil,
+              error: nil, started_at: nil, finished_at: nil, category: nil,
+              data_handling_classification: nil, policy_decision: nil
+            )
+
+            Canonical::Chunk.tool_call_delta(
+              tool_call: tc,
+              request_id: request_id,
+              block_index: first_call['index']
+            )
+          end
+
           def empty_delta?(delta)
             (delta['content'].nil? || delta['content'].to_s.empty?) &&
               (delta['tool_calls'].nil? || Array(delta['tool_calls']).empty?) &&
               (delta['reasoning_content'].nil? || delta['reasoning_content'].to_s.empty?)
           end
 
+          # Per-chunk think-tag extraction is structurally impossible while streaming:
+          # tags arrive split across SSE chunks, and ThinkingExtractor strips per-chunk
+          # whitespace, corrupting reassembled text. Emit the raw delta unmodified —
+          # the StreamAccumulator extracts think tags statefully across deltas.
+          # (Previously called ThinkingExtractor.extract_from_content, which is
+          # private_class_method in lex-llm >= 0.5.0 and raised NoMethodError on
+          # every streamed text delta, silently killing all vLLM streaming.)
           def parse_text_delta_with_thinking(content, request_id, data)
-            extraction = Responses::ThinkingExtractor.extract_from_content(content)
-            clean_text = extraction[0]
-            thinking_text = extraction[1]
-
-            if thinking_text && !thinking_text.empty?
-              Canonical::Chunk.thinking_delta(delta: thinking_text, request_id: request_id)
-            else
-              Canonical::Chunk.text_delta(
-                delta: clean_text || content,
-                request_id: request_id,
-                index: data['index']
-              )
-            end
+            Canonical::Chunk.text_delta(
+              delta: content,
+              request_id: request_id,
+              index: data['index']
+            )
           end
 
           # Parse a canonical-form chunk (from conformance kit fixtures).
