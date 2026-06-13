@@ -330,7 +330,8 @@ module Legion
           def format_message_tool_calls(tool_calls)
             return [] if tool_calls.empty?
 
-            tool_calls.map { |tc| format_tool_call_for_history(tc) }
+            tc_array = tool_calls.is_a?(Hash) ? tool_calls.values : Array(tool_calls)
+            tc_array.map { |tc| format_tool_call_for_history(tc) }
           end
 
           def format_tool_call_for_history(tool_call_entry)
@@ -372,10 +373,9 @@ module Legion
 
               name = tool_hash[:name] || tool_hash['name']
               description = (tool_hash[:description] || tool_hash['description'] || '').to_s
-              parameters = tool_hash[:parameters] || tool_hash[:input_schema] ||
-                           { type: 'object', properties: {} }
-              parameters = parameters.to_h if parameters.respond_to?(:to_h) && !parameters.is_a?(Hash)
-              parameters = { type: 'object', properties: {} } unless parameters.is_a?(Hash)
+              raw_params = tool_hash[:parameters] || tool_hash[:input_schema]
+              raw_params = raw_params.to_h if raw_params.respond_to?(:to_h) && !raw_params.is_a?(Hash)
+              parameters = Legion::Extensions::Llm::Canonical::ToolDefinition.normalize_parameters(raw_params)
 
               {
                 type: 'function',

@@ -8,6 +8,8 @@ group :test do
   # lex-llm >= 0.5.0 carries canonical types + conformance kit (released on rubygems.org)
 end
 
+gem 'lex-llm', path: ENV.fetch('LEX_LLM_PATH', '../lex-llm')
+
 gemspec
 
 group :development do
