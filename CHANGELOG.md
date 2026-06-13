@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.3.1 - 2026-06-13
+
+- **Gemfile cleanup** — Remove local path overrides; dependencies resolve from gemspec via rubygems.
+- **Bug fix** — Restore vLLM streaming; private `ThinkingExtractor` call was killing every text delta.
+- **Canonical tool normalization** — Use canonical normalization for tool parameter schemas.
+- 155 examples, 0 failures; 17 files, 0 rubocop offenses.
+
 ## 0.3.0 - 2026-06-10
 
 - Add canonical provider translator (`Translator`) implementing `render_request`,
