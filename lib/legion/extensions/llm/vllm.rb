@@ -16,7 +16,7 @@ module Legion
         extend Legion::Extensions::Llm::AutoRegistration
 
         PROVIDER_FAMILY = :vllm
-        DEFAULT_INSTANCE_TIER = { tier: :direct, capabilities: %i[completion streaming vision tools] }.freeze
+        DEFAULT_INSTANCE_TIER = { tier: :direct, capabilities: {}, provider_capabilities: { streaming: true } }.freeze
 
         def self.default_settings
           ::Legion::Extensions::Llm.provider_settings(

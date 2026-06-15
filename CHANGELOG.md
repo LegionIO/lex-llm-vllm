@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.3.2 - 2026-06-15
+
+- **CapabilityPolicy integration** — Optional capabilities default false; use `CapabilityPolicy.resolve` for offerings. Static all-true predicates no longer used for routing truth. Settings overrides at provider/instance/model level supported.
+
 ## 0.3.1 - 2026-06-13
 
 - **Gemfile cleanup** — Remove local path overrides; dependencies resolve from gemspec via rubygems.
