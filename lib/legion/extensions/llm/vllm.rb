@@ -32,10 +32,7 @@ module Legion
               fleet: {
                 enabled: false,
                 respond_to_requests: false,
-                capabilities: %i[chat stream_chat embed],
-                lanes: [],
-                concurrency: 1,
-                queue_suffix: nil
+                capabilities: %i[chat stream_chat embed]
               }
             }
           )
@@ -93,12 +90,15 @@ module Legion
           return :direct if url.nil? || url.to_s.empty?
 
           require 'uri'
+          require_relative 'vllm/actors/discovery_refresh'
           host = URI.parse(url.to_s).host.to_s.downcase
           %w[localhost 127.0.0.1 ::1].include?(host) ? :local : :direct
         rescue URI::InvalidURIError => e
           handle_exception(e, level: :debug, handled: true, operation: 'vllm.infer_tier_from_endpoint')
           :direct
         end
+
+        Legion::Extensions::Llm::Configuration.register_provider_options(Provider.configuration_options)
       end
     end
   end
