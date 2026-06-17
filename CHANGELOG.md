@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.3.3 - 2026-06-16
+
+- Dependency updates (concurrent-ruby 1.3.7, faraday 2.14.3, rubocop 1.88.0) and code quality improvements.
+
 ## 0.3.2 - 2026-06-15
 
 - **CapabilityPolicy integration** — Optional capabilities default false; use `CapabilityPolicy.resolve` for offerings. Static all-true predicates no longer used for routing truth. Settings overrides at provider/instance/model level supported.
