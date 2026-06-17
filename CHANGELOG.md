@@ -1,7 +1,8 @@
 # Changelog
 
-## 0.3.4 - 2026-06-16
+## 0.3.5 - 2026-06-16
 
+- Extract `vllm_api_key` from `credentials: { api_key: ... }` in instance settings so Bearer auth works with the standard settings layout.
 - Fix `Dalli::RingError` crash in `offering_from_model` when cache server is unavailable; cache write is now best-effort.
 
 ## 0.3.3 - 2026-06-16

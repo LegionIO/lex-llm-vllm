@@ -71,8 +71,17 @@ module Legion
         def self.normalize_instance_config(config)
           normalized = config.to_h.transform_keys(&:to_sym)
           resolve_api_base_aliases(normalized)
+          resolve_credentials(normalized)
           normalized[:tier] ||= infer_tier_from_endpoint(normalized[:vllm_api_base])
           normalized
+        end
+
+        def self.resolve_credentials(normalized)
+          creds = normalized.delete(:credentials)
+          return unless creds.is_a?(Hash)
+
+          creds = creds.transform_keys(&:to_sym)
+          normalized[:vllm_api_key] ||= creds[:api_key]
         end
 
         def self.resolve_api_base_aliases(normalized)

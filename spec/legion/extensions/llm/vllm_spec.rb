@@ -250,6 +250,26 @@ RSpec.describe Legion::Extensions::Llm::Vllm do
         .with(instance_of(URI::InvalidURIError), level: :debug, handled: true,
                                                  operation: 'vllm.infer_tier_from_endpoint')
     end
+
+    it 'extracts vllm_api_key from credentials hash' do
+      result = described_class.normalize_instance_config(
+        vllm_api_base: 'http://remote:8000',
+        credentials: { api_key: 'secret-token' }
+      )
+
+      expect(result[:vllm_api_key]).to eq('secret-token')
+      expect(result).not_to have_key(:credentials)
+    end
+
+    it 'does not override explicit vllm_api_key with credentials hash' do
+      result = described_class.normalize_instance_config(
+        vllm_api_base: 'http://remote:8000',
+        vllm_api_key: 'explicit-key',
+        credentials: { api_key: 'nested-key' }
+      )
+
+      expect(result[:vllm_api_key]).to eq('explicit-key')
+    end
   end
 
   def management_urls
