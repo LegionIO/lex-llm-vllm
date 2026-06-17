@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.3.4 - 2026-06-16
+
+- Fix `Dalli::RingError` crash in `offering_from_model` when cache server is unavailable; cache write is now best-effort.
+
 ## 0.3.3 - 2026-06-16
 
 - Dependency updates (concurrent-ruby 1.3.7, faraday 2.14.3, rubocop 1.88.0) and code quality improvements.

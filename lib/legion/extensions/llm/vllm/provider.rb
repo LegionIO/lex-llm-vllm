@@ -163,7 +163,13 @@ module Legion
 
           def offering_from_model(model_info)
             ctx = model_info.context_length
-            cache_set(model_detail_cache_key(model_info.id), { context_window: ctx }, ttl: 86_400) if ctx
+            if ctx
+              begin
+                cache_set(model_detail_cache_key(model_info.id), { context_window: ctx }, ttl: 86_400)
+              rescue StandardError => e
+                handle_exception(e, level: :debug, handled: true, operation: 'vllm.cache_model_detail')
+              end
+            end
 
             policy = Legion::Extensions::Llm::CapabilityPolicy.resolve(
               real: extract_real_capabilities(model_info),
