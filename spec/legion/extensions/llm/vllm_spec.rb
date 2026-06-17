@@ -169,7 +169,8 @@ RSpec.describe Legion::Extensions::Llm::Vllm do
       instances = described_class.discover_instances
 
       expect(instances[:gpu_cluster]).to eq(vllm_api_base: 'http://gpu-node:8000', tier: :direct,
-                                            capabilities: %i[completion streaming vision tools])
+                                            capabilities: {},
+                                            provider_capabilities: { streaming: true })
     end
 
     it 'normalizes base_url from Legion settings to vllm_api_base' do
@@ -249,6 +250,26 @@ RSpec.describe Legion::Extensions::Llm::Vllm do
         .with(instance_of(URI::InvalidURIError), level: :debug, handled: true,
                                                  operation: 'vllm.infer_tier_from_endpoint')
     end
+
+    it 'extracts vllm_api_key from credentials hash' do
+      result = described_class.normalize_instance_config(
+        vllm_api_base: 'http://remote:8000',
+        credentials: { api_key: 'secret-token' }
+      )
+
+      expect(result[:vllm_api_key]).to eq('secret-token')
+      expect(result).not_to have_key(:credentials)
+    end
+
+    it 'does not override explicit vllm_api_key with credentials hash' do
+      result = described_class.normalize_instance_config(
+        vllm_api_base: 'http://remote:8000',
+        vllm_api_key: 'explicit-key',
+        credentials: { api_key: 'nested-key' }
+      )
+
+      expect(result[:vllm_api_key]).to eq('explicit-key')
+    end
   end
 
   def management_urls
@@ -293,5 +314,60 @@ RSpec.describe Legion::Extensions::Llm::Vllm do
     allow(Thread).to receive(:new).and_yield
     publisher.publish_models_async(models, readiness:)
     events
+  end
+
+  describe 'CapabilityPolicy integration' do
+    let(:bare_model) do
+      Legion::Extensions::Llm::Model::Info.from_hash(
+        id: 'gemma-4-12b-it', name: 'gemma-4-12b-it', provider: :vllm,
+        context_length: 32_768, capabilities: [], metadata: {}
+      )
+    end
+
+    it 'does not claim tools/vision/embeddings/thinking for a bare model discovery response' do
+      offering = provider.send(:offering_from_model, bare_model)
+
+      expect(offering.capabilities).to include(:streaming)
+      expect(offering.capabilities).not_to include(:tools)
+      expect(offering.capabilities).not_to include(:vision)
+      expect(offering.capabilities).not_to include(:embeddings)
+      expect(offering.capabilities).not_to include(:thinking)
+    end
+
+    it 'produces capabilities from instance config with source :instance_override' do
+      configured = described_class::Provider.new(
+        vllm_api_base: 'http://localhost:8000',
+        capabilities: { streaming: true, tools: true, thinking: true }
+      )
+      offering = configured.send(:offering_from_model, bare_model)
+
+      expect(offering.capabilities).to include(:streaming, :tools, :thinking)
+      sources = offering.capability_sources
+      expect(sources[:tools][:source]).to eq(:instance_override)
+      expect(sources[:thinking][:source]).to eq(:instance_override)
+    end
+
+    it 'produces :thinking from enable_thinking alias with source :instance_override' do
+      configured = described_class::Provider.new(
+        vllm_api_base: 'http://localhost:8000',
+        enable_thinking: true
+      )
+      offering = configured.send(:offering_from_model, bare_model)
+
+      expect(offering.capabilities).to include(:thinking)
+      expect(offering.capability_sources[:thinking][:source]).to eq(:instance_override)
+    end
+
+    it 'produces capabilities from model-level override with source :model_override' do
+      configured = described_class::Provider.new(
+        vllm_api_base: 'http://localhost:8000',
+        models: { 'gemma-4-12b-it' => { tools_flag: true, thinking_flag: true } }
+      )
+      offering = configured.send(:offering_from_model, bare_model)
+
+      expect(offering.capabilities).to include(:tools, :thinking)
+      expect(offering.capability_sources[:tools][:source]).to eq(:model_override)
+      expect(offering.capability_sources[:thinking][:source]).to eq(:model_override)
+    end
   end
 end

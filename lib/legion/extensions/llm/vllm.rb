@@ -16,7 +16,7 @@ module Legion
         extend Legion::Extensions::Llm::AutoRegistration
 
         PROVIDER_FAMILY = :vllm
-        DEFAULT_INSTANCE_TIER = { tier: :direct, capabilities: %i[completion streaming vision tools] }.freeze
+        DEFAULT_INSTANCE_TIER = { tier: :direct, capabilities: {}, provider_capabilities: { streaming: true } }.freeze
 
         def self.default_settings
           ::Legion::Extensions::Llm.provider_settings(
@@ -32,10 +32,7 @@ module Legion
               fleet: {
                 enabled: false,
                 respond_to_requests: false,
-                capabilities: %i[chat stream_chat embed],
-                lanes: [],
-                concurrency: 1,
-                queue_suffix: nil
+                capabilities: %i[chat stream_chat embed]
               }
             }
           )
@@ -74,8 +71,17 @@ module Legion
         def self.normalize_instance_config(config)
           normalized = config.to_h.transform_keys(&:to_sym)
           resolve_api_base_aliases(normalized)
+          resolve_credentials(normalized)
           normalized[:tier] ||= infer_tier_from_endpoint(normalized[:vllm_api_base])
           normalized
+        end
+
+        def self.resolve_credentials(normalized)
+          creds = normalized.delete(:credentials)
+          return unless creds.is_a?(Hash)
+
+          creds = creds.transform_keys(&:to_sym)
+          normalized[:vllm_api_key] ||= creds[:api_key]
         end
 
         def self.resolve_api_base_aliases(normalized)
@@ -93,12 +99,15 @@ module Legion
           return :direct if url.nil? || url.to_s.empty?
 
           require 'uri'
+          require_relative 'vllm/actors/discovery_refresh'
           host = URI.parse(url.to_s).host.to_s.downcase
           %w[localhost 127.0.0.1 ::1].include?(host) ? :local : :direct
         rescue URI::InvalidURIError => e
           handle_exception(e, level: :debug, handled: true, operation: 'vllm.infer_tier_from_endpoint')
           :direct
         end
+
+        Legion::Extensions::Llm::Configuration.register_provider_options(Provider.configuration_options)
       end
     end
   end

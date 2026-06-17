@@ -2,12 +2,6 @@
 
 source 'https://rubygems.org'
 
-group :test do
-  transport_path = ENV.fetch('LEGION_TRANSPORT_PATH', File.expand_path('../../legion-transport', __dir__))
-  gem 'legion-transport', path: transport_path if File.directory?(transport_path)
-  # lex-llm >= 0.5.0 carries canonical types + conformance kit (released on rubygems.org)
-end
-
 gemspec
 
 group :development do
