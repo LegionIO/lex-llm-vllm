@@ -79,6 +79,22 @@ RSpec.describe Legion::Extensions::Llm::Vllm::Translator do
       wire = translator.render_request(req)
       expect(wire[:tool_choice]).to eq(type: 'function', function: { name: 'get_weather' })
     end
+
+    it 'requests streaming token usage via stream_options.include_usage when streaming' do
+      req = canonical::Request.build(messages: [], stream: true, metadata: { model: 'm' })
+      expect(translator.render_request(req)[:stream_options]).to eq(include_usage: true)
+    end
+
+    it 'omits stream_options for non-streaming requests' do
+      req = canonical::Request.build(messages: [], stream: false, metadata: { model: 'm' })
+      expect(translator.render_request(req)).not_to have_key(:stream_options)
+    end
+
+    it 'lets a non-conforming backend opt out via config[:stream_token_usage] = false' do
+      opted_out = described_class.new(config: { stream_token_usage: false })
+      req = canonical::Request.build(messages: [], stream: true, metadata: { model: 'm' })
+      expect(opted_out.render_request(req)).not_to have_key(:stream_options)
+    end
   end
 
   describe '#parse_response' do

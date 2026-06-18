@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.3.6 - 2026-06-18
+
+- **Streaming token usage** — request `stream_options: { include_usage: true }` on streaming chat so
+  vLLM emits the final usage-only chunk. Streaming responses now carry input/output token counts;
+  previously every streamed response reported zero tokens, which blinded metering/cost. Overridable
+  per-instance via `config[:stream_token_usage] = false` for a non-conforming OpenAI-compatible
+  backend that rejects the field. The chunk parser already handled the trailing `choices: []` usage
+  chunk; the gap was only that the request never asked for it.
+
 ## 0.3.5 - 2026-06-16
 
 - Extract `vllm_api_key` from `credentials: { api_key: ... }` in instance settings so Bearer auth works with the standard settings layout.

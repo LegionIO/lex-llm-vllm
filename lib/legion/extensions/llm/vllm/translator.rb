@@ -70,6 +70,7 @@ module Legion
             payload[:tools] = format_tools(request.tools) unless request.tools.to_h.empty?
             payload[:tool_choice] = format_tool_choice(request.tool_choice) if request.tool_choice
             payload.merge!(map_params_to_wire(request.params)) if request.params
+            payload[:stream_options] = { include_usage: true } if request.stream && stream_token_usage?
             apply_thinking_config(payload, request)
             if formatted_response_format?(request.params)
               payload[:response_format] =
@@ -207,6 +208,18 @@ module Legion
           private
 
           attr_reader :config
+
+          # OpenAI `stream_options.include_usage` asks the server to emit a final
+          # usage-only chunk (choices:[]) so streaming responses carry token counts.
+          # vLLM supports it (capability streaming_token_usage); defaults on, but a
+          # non-conforming OpenAI-compatible backend that rejects the field can opt
+          # out per-instance via config[:stream_token_usage] = false.
+          def stream_token_usage?
+            override = config.respond_to?(:[]) ? config[:stream_token_usage] : nil
+            return override != false unless override.nil?
+
+            capabilities[:streaming_token_usage] == true
+          end
 
           # ── Message formatting ──
 
