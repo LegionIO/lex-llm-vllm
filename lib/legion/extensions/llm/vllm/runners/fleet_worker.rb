@@ -37,7 +37,7 @@ module Legion
 
               payload[key] || payload[key.to_s]
             rescue StandardError => e
-              handle_exception(e, level: :debug, handled: true, operation: 'vllm.fleet_worker.payload_field',
+              handle_exception(e, level: :warn, handled: true, operation: 'vllm.fleet_worker.payload_field',
                                   field: key)
               nil
             end

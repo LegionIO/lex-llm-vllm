@@ -167,7 +167,7 @@ module Legion
               begin
                 cache_set(model_detail_cache_key(model_info.id), { context_window: ctx }, ttl: 86_400)
               rescue StandardError => e
-                handle_exception(e, level: :debug, handled: true, operation: 'vllm.cache_model_detail')
+                handle_exception(e, level: :warn, handled: true, operation: 'vllm.cache_model_detail')
               end
             end
 
@@ -221,7 +221,7 @@ module Legion
             conf = Legion::Extensions::Llm::CredentialSources.setting(:extensions, :llm, :vllm)
             conf.is_a?(Hash) ? conf.to_h.except(:instances, 'instances') : {}
           rescue StandardError => e
-            handle_exception(e, level: :debug, handled: true, operation: 'vllm.provider_capability_config')
+            handle_exception(e, level: :warn, handled: true, operation: 'vllm.provider_capability_config')
             {}
           end
 
@@ -248,7 +248,7 @@ module Legion
             hash = models_conf.to_h
             hash[model_id.to_s] || hash[model_id.to_sym] || {}
           rescue StandardError => e
-            handle_exception(e, level: :debug, handled: true, operation: 'vllm.model_capability_config')
+            handle_exception(e, level: :warn, handled: true, operation: 'vllm.model_capability_config')
             {}
           end
 
@@ -453,7 +453,7 @@ module Legion
           def vllm_thinking_setting
             instance_thinking_enabled? || global_thinking_enabled?
           rescue StandardError => e
-            handle_exception(e, level: :debug, handled: true, operation: 'vllm.thinking_setting')
+            handle_exception(e, level: :warn, handled: true, operation: 'vllm.thinking_setting')
             false
           end
 
