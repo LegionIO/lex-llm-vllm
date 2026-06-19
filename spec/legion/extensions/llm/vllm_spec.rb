@@ -247,7 +247,7 @@ RSpec.describe Legion::Extensions::Llm::Vllm do
 
       expect(result[:tier]).to eq(:direct)
       expect(described_class).to have_received(:handle_exception)
-        .with(instance_of(URI::InvalidURIError), level: :debug, handled: true,
+        .with(instance_of(URI::InvalidURIError), level: :warn, handled: true,
                                                  operation: 'vllm.infer_tier_from_endpoint')
     end
 
