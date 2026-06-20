@@ -129,6 +129,18 @@ RSpec.describe Legion::Extensions::Llm::Vllm do
     expect(offering.to_h).to include(instance_id: :apollo, transport: :rabbitmq, tier: :fleet)
   end
 
+  it 'translates instance enable_* flags into offering capabilities' do
+    configured = described_class::Provider.new(
+      vllm_api_base: 'http://localhost:8000',
+      enable_thinking: true,
+      enable_tools: true,
+      enable_streaming: true
+    )
+    offering = configured.send(:offering_from_model, model)
+
+    expect(offering.capabilities).to include(:tools, :thinking, :streaming)
+  end
+
   it 'builds sanitized lex-llm registry events for vLLM model availability' do
     events = capture_registry_events([model], readiness: { ready: true })
 

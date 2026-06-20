@@ -143,9 +143,15 @@ module Legion
             end
 
             def normalize_caps(caps)
-              return [] unless defined?(Legion::Extensions::Llm::Inventory::Capabilities)
-
-              Legion::Extensions::Llm::Inventory::Capabilities.normalize(caps)
+              # Inventory::Capabilities lives in lex-llm; the previous fallback (`return []
+              # unless defined?(...)`) silently swallowed every capability the operator
+              # declared via enable_thinking/enable_tools when the constant wasn't loaded.
+              # Always normalize through the shared vocabulary so aliases collapse.
+              if defined?(Legion::Extensions::Llm::Inventory::Capabilities)
+                Legion::Extensions::Llm::Inventory::Capabilities.normalize(caps)
+              else
+                Array(caps).compact.map(&:to_sym).uniq
+              end
             end
           end
         end
