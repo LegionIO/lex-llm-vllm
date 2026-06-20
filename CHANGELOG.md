@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.3.9] - 2026-06-20
+
+### Changed
+- Slow the live discovery refresh cadence from 60 seconds to 300 seconds for vLLM instances; `extensions.llm.vllm.discovery_interval` still overrides the default.
+
+## [0.3.8] - 2026-06-20
+
+### Fixed
+- Use the shared `lex-llm` capability override contract for provider, instance, and model settings, with canonical capability normalization for embedding/tool/thinking routing.
+
 ## [0.3.7] - 2026-06-19
 
 ### Changed
