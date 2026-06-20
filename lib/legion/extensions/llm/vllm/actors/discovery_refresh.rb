@@ -96,18 +96,33 @@ module Legion
               return [] unless adapter.respond_to?(:discover_offerings)
 
               Array(adapter.discover_offerings(live: true)).flat_map do |offering|
-                lane = build_lane(offering, instance_entry)
+                raw  = offering_to_hash(offering)
+                lane = build_lane(raw, instance_entry)
                 fleet = maybe_fleet_lane(lane)
                 fleet ? [lane, fleet] : [lane]
               end
             end
 
-            def build_lane(offering, instance_entry)
-              tier = offering[:tier] || :direct
-              type = offering_type(offering[:type])
-              instance_id = offering[:instance_id] || instance_entry[:instance_id]
+            # ModelOffering objects do not implement `[]`; normalize to a Hash so the
+            # rest of the writer stays Hash-shaped. Hash inputs pass through untouched.
+            def offering_to_hash(offering)
+              return offering if offering.is_a?(Hash)
+
+              hash = offering.to_h
+              hash[:type] ||= hash[:usage_type]
+              hash[:enabled] = offering.respond_to?(:enabled?) ? offering.enabled? : true
+              hash
+            end
+
+            def build_lane(offering, instance_entry) # rubocop:disable Metrics/AbcSize,Metrics/CyclomaticComplexity
+              tier            = offering[:tier] || :direct
+              type            = offering_type(offering[:type])
+              instance_id     = offering[:instance_id] ||
+                                instance_entry[:instance] ||
+                                instance_entry[:instance_id] ||
+                                instance_entry[:id]
               provider_family = offering[:provider_family] || :vllm
-              model = offering[:model]
+              model           = offering[:model]
               lane_id = Legion::Extensions::Llm::Inventory::ScopedRefresher.compose_id(
                 tier: tier, provider_family: provider_family, instance_id: instance_id, type: type, model: model
               )
