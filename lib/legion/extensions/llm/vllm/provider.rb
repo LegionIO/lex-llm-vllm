@@ -92,12 +92,16 @@ module Legion
             log.info { "discovering models from #{api_base}#{models_url}" }
             super.tap do |models|
               log.info { "discovered #{models.size} model(s) from vLLM" }
-              self.class.registry_publisher.publish_models_async(models, readiness: readiness(live: false))
             end
           end
 
           def discover_offerings(live: false, **filters)
-            super
+            return filter_cached_offerings(Array(@cached_offerings), filters) unless live
+
+            provider_health = health(live:)
+            @cached_offerings = discover_live_offerings(filters, provider_health, live:)
+            log_discover_complete(@cached_offerings)
+            @cached_offerings
           rescue StandardError => e
             handle_exception(e, level: :warn, handled: true, operation: 'vllm.discover_offerings')
             []
@@ -149,6 +153,42 @@ module Legion
           end
 
           private
+
+          def discovery_registry_readiness(provider_health, live:)
+            {
+              provider: slug.to_sym,
+              configured: configured?,
+              ready: provider_health[:ready] == true,
+              live: live,
+              health: provider_health
+            }
+          end
+
+          def discover_live_offerings(filters, provider_health, live:)
+            readiness = discovery_registry_readiness(provider_health, live:)
+            Array(list_models(live:, **filters)).filter_map do |model|
+              self.class.registry_publisher.publish_models_async([model], readiness:)
+              next unless model_matches_filters?(model, filters)
+              next unless model_allowed?(model.id)
+
+              log_model_discovered(model)
+              offering_from_model(model, health: provider_health)
+            end
+          end
+
+          def log_model_discovered(model)
+            log.unknown(
+              "[#{slug}] instance=#{provider_instance_id} action=model_discovered " \
+              "model=#{model.id} family=#{model.family}"
+            )
+          end
+
+          def log_discover_complete(offerings)
+            log.info(
+              "[#{slug}] instance=#{provider_instance_id} action=discover_complete " \
+              "model_count=#{Array(offerings).size}"
+            )
+          end
 
           def offering_from_model(model_info, health: {})
             ctx = model_info.context_length

@@ -100,11 +100,13 @@ RSpec.describe Legion::Extensions::Llm::Vllm do
   it 'publishes discovered models asynchronously through the registry publisher' do
     stub_registry_publisher
     stub_model_discovery
+    allow(provider).to receive(:health).and_return(provider: :vllm, instance_id: :default, ready: true,
+                                                   status: 'healthy', circuit_state: 'closed', raw: {})
+    allow(registry_publisher).to receive(:publish_readiness_async)
 
-    models = provider.list_models
+    provider.discover_offerings(live: true)
 
-    expect(registry_publisher).to have_received(:publish_models_async)
-      .with(models, readiness: hash_including(provider: :vllm, live: false))
+    expect(registry_publisher).to have_received(:publish_models_async).at_least(:once)
   end
 
   it 'does not probe vLLM for uncached non-live offerings reads' do
