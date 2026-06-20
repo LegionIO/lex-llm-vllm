@@ -74,8 +74,6 @@ module Legion
 
             def manual
               run_scoped_tick
-              log.debug('[vllm][discovery_refresh] refreshing model list')
-              run_legacy_refresh
             rescue StandardError => e
               handle_exception(e, level: :warn, handled: true, operation: 'vllm.actor.discovery_refresh')
             end
@@ -87,20 +85,6 @@ module Legion
               return unless self.class.ancestors.include?(Legion::Extensions::Llm::Inventory::ScopedRefresher)
 
               tick
-            end
-
-            def run_legacy_refresh
-              return unless defined?(Legion::LLM::Discovery)
-
-              Legion::LLM::Discovery.refresh_discovered_models!(provider: :vllm)
-              if defined?(Legion::LLM::Router) && Legion::LLM::Router.respond_to?(:populate_auto_rules)
-                Legion::LLM::Router.populate_auto_rules(Legion::LLM::Discovery.discovered_instances)
-              end
-              unless defined?(Legion::LLM::Inventory) && Legion::LLM::Inventory.respond_to?(:invalidate_offerings_cache!)
-                return
-              end
-
-              Legion::LLM::Inventory.invalidate_offerings_cache!
             end
 
             def vllm_instances

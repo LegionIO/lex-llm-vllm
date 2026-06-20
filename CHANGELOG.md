@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.3.7] - 2026-06-19
+
+### Changed
+- Adopt `Legion::Extensions::Llm::Inventory::ScopedRefresher` mixin (lex-llm 0.6.0). Discovery
+  refresh actors now write directly to the live `Inventory` catalog via `Inventory.write_lane`.
+- Pin `lex-llm >= 0.6.0` and `legion-llm >= 0.14.0` in gemspec.
+- Standard `weight: 100` default added to provider instance settings schema.
+
 ## 0.3.6 - 2026-06-18
 
 - **Streaming token usage** — request `stream_options: { include_usage: true }` on streaming chat so
