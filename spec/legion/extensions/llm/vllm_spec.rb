@@ -349,7 +349,7 @@ RSpec.describe Legion::Extensions::Llm::Vllm do
     events = []
     allow(publisher).to receive(:publishing_available?).and_return(true)
     allow(publisher).to receive(:publish_event) { |event| events << event }
-    allow(Thread).to receive(:new).and_yield
+    allow(publisher).to receive(:schedule).and_yield
     publisher.publish_models_async(models, readiness:)
     events
   end
