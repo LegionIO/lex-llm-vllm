@@ -103,7 +103,7 @@ module Legion
           host = URI.parse(url.to_s).host.to_s.downcase
           %w[localhost 127.0.0.1 ::1].include?(host) ? :local : :direct
         rescue URI::InvalidURIError => e
-          handle_exception(e, level: :debug, handled: true, operation: 'vllm.infer_tier_from_endpoint')
+          handle_exception(e, level: :warn, handled: true, operation: 'vllm.infer_tier_from_endpoint')
           :direct
         end
 

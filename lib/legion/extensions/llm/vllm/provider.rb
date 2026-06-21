@@ -33,9 +33,9 @@ module Legion
 
             def chat?(_model) = true
             def streaming?(_model) = true
-            def vision?(_model) = true
-            def functions?(_model) = true
-            def embeddings?(_model) = true
+            def vision?(_model) = false
+            def functions?(_model) = false
+            def embeddings?(_model) = false
 
             def critical_capabilities_for(model)
               [
@@ -78,7 +78,7 @@ module Legion
 
           def health(live: false)
             log.info { "checking health live=#{live} at #{api_base}#{health_url}" }
-            connection.get(health_url).body
+            super
           end
 
           def readiness(live: false)
@@ -88,27 +88,20 @@ module Legion
             end
           end
 
-          def list_models
+          def list_models(live: false, **filters)
             log.info { "discovering models from #{api_base}#{models_url}" }
             super.tap do |models|
               log.info { "discovered #{models.size} model(s) from vLLM" }
-              self.class.registry_publisher.publish_models_async(models, readiness: readiness(live: false))
             end
           end
 
-          def discover_offerings(live: false, **)
-            models = if live
-                       @cached_models = list_models
-                     else
-                       Array(@cached_models)
-                     end
-            offerings = models.filter_map do |model_info|
-              next unless model_allowed?(model_info.id)
+          def discover_offerings(live: false, **filters)
+            return filter_cached_offerings(Array(@cached_offerings), filters) unless live
 
-              offering_from_model(model_info)
-            end
-            log.debug { "built #{offerings.size} vLLM offering(s) live=#{live}" }
-            offerings
+            provider_health = health(live:)
+            @cached_offerings = discover_live_offerings(filters, provider_health, live:)
+            log_discover_complete(@cached_offerings)
+            @cached_offerings
           rescue StandardError => e
             handle_exception(e, level: :warn, handled: true, operation: 'vllm.discover_offerings')
             []
@@ -161,13 +154,49 @@ module Legion
 
           private
 
-          def offering_from_model(model_info)
+          def discovery_registry_readiness(provider_health, live:)
+            {
+              provider: slug.to_sym,
+              configured: configured?,
+              ready: provider_health[:ready] == true,
+              live: live,
+              health: provider_health
+            }
+          end
+
+          def discover_live_offerings(filters, provider_health, live:)
+            readiness = discovery_registry_readiness(provider_health, live:)
+            Array(list_models(live:, **filters)).filter_map do |model|
+              self.class.registry_publisher.publish_models_async([model], readiness:)
+              next unless model_matches_filters?(model, filters)
+              next unless model_allowed?(model.id)
+
+              log_model_discovered(model)
+              offering_from_model(model, health: provider_health)
+            end
+          end
+
+          def log_model_discovered(model)
+            log.debug(
+              "[#{slug}] instance=#{provider_instance_id} action=model_discovered " \
+              "model=#{model.id} family=#{model.family}"
+            )
+          end
+
+          def log_discover_complete(offerings)
+            log.info(
+              "[#{slug}] instance=#{provider_instance_id} action=discover_complete " \
+              "model_count=#{Array(offerings).size}"
+            )
+          end
+
+          def offering_from_model(model_info, health: {})
             ctx = model_info.context_length
             if ctx
               begin
                 cache_set(model_detail_cache_key(model_info.id), { context_window: ctx }, ttl: 86_400)
               rescue StandardError => e
-                handle_exception(e, level: :debug, handled: true, operation: 'vllm.cache_model_detail')
+                handle_exception(e, level: :warn, handled: true, operation: 'vllm.cache_model_detail')
               end
             end
 
@@ -181,11 +210,12 @@ module Legion
               model_config: model_capability_config(model_info.id)
             )
 
-            build_offering(model_info, policy, ctx)
+            build_offering(model_info, policy, ctx, health)
           end
 
-          def build_offering(model_info, policy, ctx) # rubocop:disable Metrics/AbcSize
+          def build_offering(model_info, policy, ctx, health) # rubocop:disable Metrics/AbcSize
             max_out = model_info.respond_to?(:max_output_tokens) ? model_info.max_output_tokens : nil
+            usage_type = policy[:capabilities].include?(:embedding) ? :embedding : :inference
 
             Legion::Extensions::Llm::Routing::ModelOffering.new(
               provider_family: :vllm,
@@ -195,10 +225,11 @@ module Legion
               model: model_info.id,
               canonical_model_alias: model_info.respond_to?(:name) ? model_info.name : nil,
               model_family: model_info.respond_to?(:family) ? model_info.family : nil,
-              usage_type: model_info.embedding? ? :embedding : :inference,
+              usage_type: usage_type,
               capabilities: policy[:capabilities],
               capability_sources: policy[:sources],
               limits: { context_window: ctx, max_output_tokens: max_out }.compact,
+              health: health,
               metadata: offering_metadata_for(model_info).merge(capability_sources: policy[:sources])
             )
           end
@@ -212,51 +243,7 @@ module Legion
           end
 
           def provider_envelope_capabilities
-            { streaming: true }
-          end
-
-          def provider_capability_config
-            return {} unless defined?(Legion::Extensions::Llm::CredentialSources)
-
-            conf = Legion::Extensions::Llm::CredentialSources.setting(:extensions, :llm, :vllm)
-            conf.is_a?(Hash) ? conf.to_h.except(:instances, 'instances') : {}
-          rescue StandardError => e
-            handle_exception(e, level: :debug, handled: true, operation: 'vllm.provider_capability_config')
-            {}
-          end
-
-          def instance_capability_config
-            cfg = config
-            result = {}
-            %i[capabilities enable_thinking enable_tools enable_streaming enable_vision enable_embeddings
-               thinking_flag tools_flag streaming_flag vision_flag embedding_flag embeddings_flag
-               tool_flag images_flag image_flag].each do |key|
-              next unless cfg.respond_to?(key)
-
-              val = cfg.send(key)
-              result[key] = val unless val.nil?
-            rescue StandardError
-              next
-            end
-            result
-          end
-
-          def model_capability_config(model_id)
-            models_conf = resolve_models_config
-            return {} unless models_conf.respond_to?(:to_h)
-
-            hash = models_conf.to_h
-            hash[model_id.to_s] || hash[model_id.to_sym] || {}
-          rescue StandardError => e
-            handle_exception(e, level: :debug, handled: true, operation: 'vllm.model_capability_config')
-            {}
-          end
-
-          def resolve_models_config
-            return config.models if config.respond_to?(:models)
-            return config[:models] if config.respond_to?(:[])
-
-            nil
+            { completion: true, streaming: true }
           end
 
           def offering_metadata_for(model_info)
@@ -453,7 +440,7 @@ module Legion
           def vllm_thinking_setting
             instance_thinking_enabled? || global_thinking_enabled?
           rescue StandardError => e
-            handle_exception(e, level: :debug, handled: true, operation: 'vllm.thinking_setting')
+            handle_exception(e, level: :warn, handled: true, operation: 'vllm.thinking_setting')
             false
           end
 

@@ -73,7 +73,7 @@ RSpec.describe Legion::Extensions::Llm::Vllm do
     models = provider.send(:parse_list_models_response, fake_response(models_body), :vllm,
                            described_class::Provider.capabilities)
 
-    expect(models.first.capabilities).to include(:streaming, :function_calling, :vision, :embeddings)
+    expect(models.first.capabilities).to eq([:streaming])
     expect(models.first.context_length).to eq(131_072)
   end
 
@@ -87,14 +87,26 @@ RSpec.describe Legion::Extensions::Llm::Vllm do
     expect(registry_publisher).to have_received(:publish_readiness_async).with(readiness)
   end
 
+  it 'returns structured provider health for live discovery offerings' do
+    allow(provider.connection).to receive(:get).with('/health').and_return(fake_response({}))
+    stub_model_discovery
+
+    offering = provider.discover_offerings(live: true).first
+
+    expect(offering.health).to include(provider: :vllm, instance_id: :default)
+    expect(offering.health[:raw]).to eq({})
+  end
+
   it 'publishes discovered models asynchronously through the registry publisher' do
     stub_registry_publisher
     stub_model_discovery
+    allow(provider).to receive(:health).and_return(provider: :vllm, instance_id: :default, ready: true,
+                                                   status: 'healthy', circuit_state: 'closed', raw: {})
+    allow(registry_publisher).to receive(:publish_readiness_async)
 
-    models = provider.list_models
+    provider.discover_offerings(live: true)
 
-    expect(registry_publisher).to have_received(:publish_models_async)
-      .with(models, readiness: hash_including(provider: :vllm, live: false))
+    expect(registry_publisher).to have_received(:publish_models_async).at_least(:once)
   end
 
   it 'does not probe vLLM for uncached non-live offerings reads' do
@@ -115,6 +127,7 @@ RSpec.describe Legion::Extensions::Llm::Vllm do
   end
 
   it 'serves non-live offerings reads from the live discovery cache' do
+    allow(provider.connection).to receive(:get).with('/health').and_return(fake_response({}))
     stub_model_discovery
     live_offerings = provider.discover_offerings(live: true)
     allow(provider).to receive(:list_models).and_raise('unexpected live discovery')
@@ -127,6 +140,31 @@ RSpec.describe Legion::Extensions::Llm::Vllm do
     offering = configured.send(:offering_from_model, model)
 
     expect(offering.to_h).to include(instance_id: :apollo, transport: :rabbitmq, tier: :fleet)
+  end
+
+  it 'translates instance enable_* flags into offering capabilities' do
+    configured = described_class::Provider.new(
+      vllm_api_base: 'http://localhost:8000',
+      enable_thinking: true,
+      enable_tools: true,
+      enable_streaming: true
+    )
+    offering = configured.send(:offering_from_model, model)
+
+    expect(offering.capabilities).to include(:completion, :tools, :thinking, :streaming)
+  end
+
+  it 'does not reclassify inference models as embeddings when embedding is not resolved' do
+    configured = described_class::Provider.new(
+      vllm_api_base: 'http://localhost:8000',
+      enable_thinking: true,
+      enable_tools: true
+    )
+
+    offering = configured.send(:offering_from_model, model)
+
+    expect(offering.usage_type).to eq(:inference)
+    expect(offering.capabilities).not_to include(:embedding)
   end
 
   it 'builds sanitized lex-llm registry events for vLLM model availability' do
@@ -247,7 +285,7 @@ RSpec.describe Legion::Extensions::Llm::Vllm do
 
       expect(result[:tier]).to eq(:direct)
       expect(described_class).to have_received(:handle_exception)
-        .with(instance_of(URI::InvalidURIError), level: :debug, handled: true,
+        .with(instance_of(URI::InvalidURIError), level: :warn, handled: true,
                                                  operation: 'vllm.infer_tier_from_endpoint')
     end
 
@@ -311,7 +349,7 @@ RSpec.describe Legion::Extensions::Llm::Vllm do
     events = []
     allow(publisher).to receive(:publishing_available?).and_return(true)
     allow(publisher).to receive(:publish_event) { |event| events << event }
-    allow(Thread).to receive(:new).and_yield
+    allow(publisher).to receive(:schedule).and_yield
     publisher.publish_models_async(models, readiness:)
     events
   end
@@ -330,7 +368,7 @@ RSpec.describe Legion::Extensions::Llm::Vllm do
       expect(offering.capabilities).to include(:streaming)
       expect(offering.capabilities).not_to include(:tools)
       expect(offering.capabilities).not_to include(:vision)
-      expect(offering.capabilities).not_to include(:embeddings)
+      expect(offering.capabilities).not_to include(:embedding)
       expect(offering.capabilities).not_to include(:thinking)
     end
 

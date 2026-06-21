@@ -1,5 +1,42 @@
 # Changelog
 
+## [0.3.11] - 2026-06-20
+
+### Fixed
+- Stub shared registry publishing through `RegistryPublisher#schedule` in specs so async availability-event coverage stays stable after the shared publisher moved off raw `Thread.new`.
+
+## [0.3.10] - 2026-06-20
+
+### Fixed
+- Stop bulk-publishing vLLM model availability from `list_models`; discovery now emits one registry event per seen model from the shared `lex-llm` policy-filter path so blocked models stay observable without duplicate publishes.
+
+## [0.3.9] - 2026-06-20
+
+### Changed
+- Slow the live discovery refresh cadence from 60 seconds to 300 seconds for vLLM instances; `extensions.llm.vllm.discovery_interval` still overrides the default.
+
+## [0.3.8] - 2026-06-20
+
+### Fixed
+- Use the shared `lex-llm` capability override contract for provider, instance, and model settings, with canonical capability normalization for embedding/tool/thinking routing.
+
+## [0.3.7] - 2026-06-19
+
+### Changed
+- Adopt `Legion::Extensions::Llm::Inventory::ScopedRefresher` mixin (lex-llm 0.6.0). Discovery
+  refresh actors now write directly to the live `Inventory` catalog via `Inventory.write_lane`.
+- Pin `lex-llm >= 0.6.0` and `legion-llm >= 0.14.0` in gemspec.
+- Standard `weight: 100` default added to provider instance settings schema.
+
+## 0.3.6 - 2026-06-18
+
+- **Streaming token usage** — request `stream_options: { include_usage: true }` on streaming chat so
+  vLLM emits the final usage-only chunk. Streaming responses now carry input/output token counts;
+  previously every streamed response reported zero tokens, which blinded metering/cost. Overridable
+  per-instance via `config[:stream_token_usage] = false` for a non-conforming OpenAI-compatible
+  backend that rejects the field. The chunk parser already handled the trailing `choices: []` usage
+  chunk; the gap was only that the request never asked for it.
+
 ## 0.3.5 - 2026-06-16
 
 - Extract `vllm_api_key` from `credentials: { api_key: ... }` in instance settings so Bearer auth works with the standard settings layout.
