@@ -2,6 +2,7 @@
 
 require 'legion/extensions/llm/canonical'
 require 'legion/extensions/llm/responses/thinking_extractor'
+require 'legion/extensions/llm/stop_reason_mapping'
 require 'legion/json'
 require 'legion/logging'
 
@@ -25,13 +26,10 @@ module Legion
         # rubocop:disable Metrics/ClassLength, Metrics/AbcSize, Metrics/CyclomaticComplexity, Metrics/PerceivedComplexity -- translator implementation
         class Translator
           include Legion::Logging::Helper
+          # Shared stop_reason vocabulary (tool_calls/tool_use/stop/length/...).
+          # vLLM is OpenAI-compatible and needs no additions; inherits the common map.
+          include Legion::Extensions::Llm::StopReasonMapping
 
-          # vLLM-specific stop_reason mapping (per conformance fixture stop_reason_matrix).
-          VLLM_STOP_REASON_MAP = {
-            'stop' => :end_turn,
-            'tool_use' => :tool_use,
-            'length' => :max_tokens
-          }.freeze
           FALLBACK_STOP_REASON = :end_turn
 
           # G18 parameter mapping: supported canonical params.
@@ -200,7 +198,7 @@ module Legion
               tool_calls_as_text: true,
               forced_tool_choice: true,
               thinking_tags: %w[think thinking],
-              stop_reason_map: VLLM_STOP_REASON_MAP,
+              stop_reason_map: stop_reason_map,
               streaming_token_usage: true
             }.freeze
           end
@@ -694,7 +692,7 @@ module Legion
           def map_stop_reason(raw)
             return FALLBACK_STOP_REASON if raw.nil? || raw.to_s.empty?
 
-            VLLM_STOP_REASON_MAP.fetch(raw.to_s, FALLBACK_STOP_REASON)
+            stop_reason_lookup(raw) || FALLBACK_STOP_REASON
           end
 
           # ── JSON helpers ──

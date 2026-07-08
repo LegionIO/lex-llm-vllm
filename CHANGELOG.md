@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.3.12] - 2026-07-05
+
+### Changed
+- Stop_reason mapping now uses the shared `Legion::Extensions::Llm::StopReasonMapping` mixin from lex-llm (>= 0.6.9) instead of a local `VLLM_STOP_REASON_MAP`. The local 3-entry map only recognized `tool_use` and silently fell back to `:end_turn` on the `tool_calls` finish_reason that OpenAI-compatible vLLM actually emits on tool turns — so vLLM tool completions were mis-reported as `end_turn`. The shared vocabulary maps both `tool_calls` and `tool_use` to `:tool_use` (plus `stop`/`end_turn`/`eos`, `length`/`max_tokens`, `stop_sequence`, `content_filter`), and is inherited by every provider so it no longer drifts per gem.
+
 ## [0.3.11] - 2026-06-20
 
 ### Fixed
