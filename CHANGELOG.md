@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.3.13] - 2026-07-14
+
+### Fixed
+- **Streaming dead stop on Qwen with thinking enabled.** `empty_delta?` only checked `delta['reasoning_content']`, missing vLLM's `delta['reasoning']` field. When the final chunk carried `finish_reason: "stop"` alongside a `reasoning` delta, the translator incorrectly treated it as an empty delta and fired the done chunk early — the content phase never started, producing an empty streaming response. Now checks both `reasoning_content` and `reasoning`. Also fixed `wire_metadata` to read from either field for sync responses.
+
 ## [0.3.12] - 2026-07-05
 
 ### Changed

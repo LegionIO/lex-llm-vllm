@@ -611,7 +611,8 @@ module Legion
 
           def wire_metadata(wire, message, _thinking_meta)
             meta = {}
-            meta[:reasoning_content] = message['reasoning_content'] if message['reasoning_content']
+            reasoning = message['reasoning_content'] || message['reasoning']
+            meta[:reasoning_content] = reasoning if reasoning
             raw_usage = wire['usage']
             if raw_usage.is_a?(Hash) && raw_usage['completion_tokens_details']
               meta[:completion_tokens_details] = raw_usage['completion_tokens_details']
@@ -655,7 +656,8 @@ module Legion
           def empty_delta?(delta)
             (delta['content'].nil? || delta['content'].to_s.empty?) &&
               (delta['tool_calls'].nil? || Array(delta['tool_calls']).empty?) &&
-              (delta['reasoning_content'].nil? || delta['reasoning_content'].to_s.empty?)
+              (delta['reasoning_content'].nil? || delta['reasoning_content'].to_s.empty?) &&
+              (delta['reasoning'].nil? || delta['reasoning'].to_s.empty?)
           end
 
           # Per-chunk think-tag extraction is structurally impossible while streaming:
