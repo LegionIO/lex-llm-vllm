@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.3.14] - 2026-07-24
+
+### Fixed
+- **Translator passes `finish_reason` and `usage` through on all streaming chunk types.** vLLM sends `finish_reason` on the same chunk as the last content token. Previously the translator dropped it because the early-return pattern only emitted finish_reason when the delta was empty. Now `text_delta`, `tool_call_delta`, and `thinking_delta` chunks carry `stop_reason` and `usage` when present on the SSE event, enabling the accumulator to capture the real provider signal.
+- **Translator returns both thinking and content when vLLM sends both on the same SSE chunk.** vLLM emits `reasoning` and `content` simultaneously on the boundary between thinking and visible output. Previously the first-branch-wins pattern dropped content when reasoning was present, causing visible characters to disappear from responses (e.g. numbered list items losing their leading digit). `parse_chunk` now returns an array `[thinking_delta, text_delta]` when both fields are present, and the streaming handler iterates them.
+
 ## [0.3.13] - 2026-07-14
 
 ### Fixed
