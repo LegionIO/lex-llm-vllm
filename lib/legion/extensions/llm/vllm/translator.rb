@@ -163,8 +163,18 @@ module Legion
               )
             end
 
+            chunk_stop_reason = finish_reason ? map_stop_reason(finish_reason) : nil
+            chunk_usage = finish_reason && data['usage'] ? Canonical::Usage.from_hash(data['usage']) : nil
+
             tool_calls = Array(delta['tool_calls'])
-            return build_tool_call_delta_chunk(tool_calls.first, request_id) unless tool_calls.empty?
+            unless tool_calls.empty?
+              if delta['content'] && !delta['content'].to_s.empty?
+                log.unknown "[vllm][translator] action=content_dropped_with_tool_call " \
+                            "content=#{delta['content'][0, 100].inspect} request_id=#{request_id}"
+              end
+              return build_tool_call_delta_chunk(tool_calls.first, request_id,
+                                                stop_reason: chunk_stop_reason, usage: chunk_usage)
+            end
 
             # Thinking delta from reasoning_content
             reasoning_content = delta['reasoning_content'] || delta['reasoning']
@@ -173,13 +183,18 @@ module Legion
                 delta: reasoning_content,
                 request_id: request_id,
                 block_index: delta.dig('content_block', 'index'),
-                item_id: delta['content_block_start']&.dig('id')
+                item_id: delta['content_block_start']&.dig('id'),
+                stop_reason: chunk_stop_reason,
+                usage: chunk_usage
               )
             end
 
             # Text delta — check for embedded think tags
             content = delta['content']
-            return parse_text_delta_with_thinking(content, request_id, data) unless content.to_s.empty?
+            unless content.to_s.empty?
+              return parse_text_delta_with_thinking(content, request_id, data,
+                                                   stop_reason: chunk_stop_reason, usage: chunk_usage)
+            end
 
             nil
           rescue Legion::JSON::ParseError => e
@@ -635,7 +650,7 @@ module Legion
           # fragments carry id: nil and a raw partial-JSON arguments string.
           # The StreamAccumulator keys off a nil id to append fragments to the
           # current tool call, so the id must NOT be synthesized here.
-          def build_tool_call_delta_chunk(first_call, request_id)
+          def build_tool_call_delta_chunk(first_call, request_id, stop_reason: nil, usage: nil)
             function = first_call.fetch('function', {})
 
             tc = Canonical::ToolCall.new(
@@ -649,7 +664,9 @@ module Legion
             Canonical::Chunk.tool_call_delta(
               tool_call: tc,
               request_id: request_id,
-              block_index: first_call['index']
+              block_index: first_call['index'],
+              stop_reason: stop_reason,
+              usage: usage
             )
           end
 
@@ -667,11 +684,13 @@ module Legion
           # (Previously called ThinkingExtractor.extract_from_content, which is
           # private_class_method in lex-llm >= 0.5.0 and raised NoMethodError on
           # every streamed text delta, silently killing all vLLM streaming.)
-          def parse_text_delta_with_thinking(content, request_id, data)
+          def parse_text_delta_with_thinking(content, request_id, data, stop_reason: nil, usage: nil)
             Canonical::Chunk.text_delta(
               delta: content,
               request_id: request_id,
-              index: data['index']
+              index: data['index'],
+              stop_reason: stop_reason,
+              usage: usage
             )
           end
 
