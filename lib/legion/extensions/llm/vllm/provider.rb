@@ -471,10 +471,14 @@ module Legion
 
           # Override: delegate SSE chunk parsing to the canonical translator.
           def build_chunk(data)
-            canonical_chunk = translator.parse_chunk(data)
-            return nil if canonical_chunk.nil?
+            result = translator.parse_chunk(data)
+            return nil if result.nil?
 
-            to_legacy_chunk(canonical_chunk, data)
+            if result.is_a?(Array)
+              result.map { |c| to_legacy_chunk(c, data) }
+            else
+              to_legacy_chunk(result, data)
+            end
           end
 
           def parse_list_models_response(response, provider, capabilities)

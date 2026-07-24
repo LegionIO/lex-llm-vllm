@@ -169,7 +169,7 @@ module Legion
             tool_calls = Array(delta['tool_calls'])
             unless tool_calls.empty?
               if delta['content'] && !delta['content'].to_s.empty?
-                log.unknown "[vllm][translator] action=content_dropped_with_tool_call " \
+                log.debug "[vllm][translator] action=content_dropped_with_tool_call " \
                             "content=#{delta['content'][0, 100].inspect} request_id=#{request_id}"
               end
               return build_tool_call_delta_chunk(tool_calls.first, request_id,
@@ -178,19 +178,25 @@ module Legion
 
             # Thinking delta from reasoning_content
             reasoning_content = delta['reasoning_content'] || delta['reasoning']
+            content = delta['content']
             unless reasoning_content.to_s.empty?
-              return Canonical::Chunk.thinking_delta(
+              thinking_chunk = Canonical::Chunk.thinking_delta(
                 delta: reasoning_content,
                 request_id: request_id,
                 block_index: delta.dig('content_block', 'index'),
                 item_id: delta['content_block_start']&.dig('id'),
-                stop_reason: chunk_stop_reason,
-                usage: chunk_usage
+                stop_reason: content.to_s.empty? ? chunk_stop_reason : nil,
+                usage: content.to_s.empty? ? chunk_usage : nil
               )
+              if content.to_s.empty?
+                return thinking_chunk
+              end
+              content_chunk = parse_text_delta_with_thinking(content, request_id, data,
+                                                            stop_reason: chunk_stop_reason, usage: chunk_usage)
+              return [thinking_chunk, content_chunk]
             end
 
             # Text delta — check for embedded think tags
-            content = delta['content']
             unless content.to_s.empty?
               return parse_text_delta_with_thinking(content, request_id, data,
                                                    stop_reason: chunk_stop_reason, usage: chunk_usage)
@@ -727,6 +733,7 @@ module Legion
             log.debug { "vLLM translator chunk parse error: #{e.message}" }
             nil
           end
+
         end
         # rubocop:enable Metrics/ClassLength, Metrics/AbcSize, Metrics/CyclomaticComplexity, Metrics/PerceivedComplexity
       end
