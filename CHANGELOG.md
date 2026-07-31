@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.3.16] - 2026-07-31
+
+### Fixed
+- **`parse_chunk` now handles multiple tool_calls batched in a single SSE delta.** vLLM can batch several parallel tool_calls into one `choices[0].delta.tool_calls` array. Previously only `tool_calls.first` was processed — the 2nd+ tool calls were silently dropped, causing parallel tool invocations to lose calls. Now returns an array of `tool_call_delta` chunks (one per tool_call), which the streaming handler already iterates (per lex-llm 0.6.13). Single tool_call deltas still return a single chunk (not wrapped in an array) for backward compatibility.
+
 ## [0.3.15] - 2026-07-31
 
 ### Fixed

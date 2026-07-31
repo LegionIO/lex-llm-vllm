@@ -172,8 +172,11 @@ module Legion
                 log.debug '[vllm][translator] action=content_dropped_with_tool_call ' \
                           "content=#{delta['content'][0, 100].inspect} request_id=#{request_id}"
               end
-              return build_tool_call_delta_chunk(tool_calls.first, request_id,
-                                                 stop_reason: chunk_stop_reason, usage: chunk_usage)
+              chunks = tool_calls.map do |tc|
+                build_tool_call_delta_chunk(tc, request_id,
+                                            stop_reason: chunk_stop_reason, usage: chunk_usage)
+              end
+              return chunks.size == 1 ? chunks.first : chunks
             end
 
             # Thinking delta from reasoning_content

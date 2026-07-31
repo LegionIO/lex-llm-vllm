@@ -51,5 +51,42 @@ RSpec.describe Legion::Extensions::Llm::Vllm::Translator do
       expect(chunk.tool_call.id).to be_nil
       expect(chunk.tool_call.arguments).to eq('{"city":"Min')
     end
+
+    it 'returns an array of chunks when multiple tool_calls are batched in one delta' do
+      data = { 'id' => 'c1', 'model' => 'qwen', 'choices' => [{ 'delta' => { 'tool_calls' => [
+        { 'id' => 'call_1', 'index' => 0, 'function' => { 'name' => 'weather', 'arguments' => '{}' } },
+        { 'id' => 'call_2', 'index' => 1, 'function' => { 'name' => 'time', 'arguments' => '{}' } }
+      ] }, 'finish_reason' => nil }] }
+      result = translator.parse_chunk(data)
+      expect(result).to be_an(Array).and have_attributes(size: 2)
+      expect(result[0].tool_call.id).to eq('call_1')
+      expect(result[0].tool_call.name).to eq('weather')
+      expect(result[1].tool_call.id).to eq('call_2')
+      expect(result[1].tool_call.name).to eq('time')
+    end
+  end
+
+  describe '#parse_chunk batched tool_calls through full streaming path' do
+    let(:batched_data) do
+      { 'id' => 'c1', 'model' => 'qwen', 'choices' => [{ 'delta' => { 'tool_calls' => [
+        { 'id' => 'call_a', 'index' => 0, 'function' => { 'name' => 'search', 'arguments' => '{"q":"hi"}' } },
+        { 'id' => 'call_b', 'index' => 1, 'function' => { 'name' => 'fetch', 'arguments' => '{"url":"x"}' } }
+      ] }, 'finish_reason' => 'tool_calls' }] }
+    end
+
+    it 'assembles both tool calls when batched delta flows through provider build_chunk' do
+      provider = Legion::Extensions::Llm::Vllm::Provider.allocate
+      result = provider.send(:build_chunk, batched_data)
+      expect(result).to be_an(Array)
+
+      accumulator = Legion::Extensions::Llm::StreamAccumulator.new
+      result.each { |chunk| accumulator.add(chunk) }
+      message = accumulator.to_message(nil)
+
+      expect(message.tool_calls.keys).to contain_exactly('call_a', 'call_b')
+      expect(message.tool_calls['call_a'].name).to eq('search')
+      expect(message.tool_calls['call_b'].name).to eq('fetch')
+      expect(message.stop_reason).to eq(:tool_use)
+    end
   end
 end
