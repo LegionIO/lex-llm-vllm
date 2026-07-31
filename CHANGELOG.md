@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.3.15] - 2026-07-31
+
+### Fixed
+- **`to_legacy_chunk` now propagates `stop_reason` from canonical chunks.** The canonical translator correctly parsed vLLM's `finish_reason` into `Canonical::Chunk.stop_reason`, but `to_legacy_chunk` never passed it into the legacy `Legion::Extensions::Llm::Chunk` constructor. The `StreamAccumulator` already reads `chunk.stop_reason` (line 40), so the field was silently nil on every streamed chunk — downstream always defaulted to `:end_turn` regardless of what the provider actually said. Truncated responses (`:max_tokens`) and content-filtered responses (`:content_filter`) were indistinguishable from clean completions. Now the real finish_reason flows through: canonical chunk → legacy chunk → accumulator → assembled Message.
+
 ## [0.3.14] - 2026-07-24
 
 ### Fixed

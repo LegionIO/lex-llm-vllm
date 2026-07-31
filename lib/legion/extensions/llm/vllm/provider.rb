@@ -363,6 +363,7 @@ module Legion
               thinking: thinking,
               input_tokens: usage.respond_to?(:input_tokens) ? usage.input_tokens : nil,
               output_tokens: usage.respond_to?(:output_tokens) ? usage.output_tokens : nil,
+              stop_reason: canonical.stop_reason,
               raw: raw_data
             )
           end
