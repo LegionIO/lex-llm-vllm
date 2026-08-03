@@ -52,5 +52,79 @@ RSpec.describe Legion::Extensions::Llm::Vllm::Provider do
       data = { 'id' => 'c1', 'choices' => [{ 'delta' => { 'role' => 'assistant' }, 'finish_reason' => nil }] }
       expect(provider.send(:build_chunk, data)).to be_nil
     end
+
+    context 'with stop_reason propagation through legacy chunk bridge' do
+      it 'propagates finish_reason=length as :max_tokens through to the assembled Message' do
+        content_data = { 'id' => 'c1', 'model' => 'qwen',
+                         'choices' => [{ 'delta' => { 'content' => 'truncated output' },
+                                         'finish_reason' => 'length' }] }
+
+        chunk = provider.send(:build_chunk, content_data)
+        expect(chunk).to be_a(Legion::Extensions::Llm::Chunk)
+        expect(chunk.stop_reason).to eq(:max_tokens)
+
+        accumulator = Legion::Extensions::Llm::StreamAccumulator.new
+        accumulator.add(chunk)
+        message = accumulator.to_message(nil)
+        expect(message.stop_reason).to eq(:max_tokens)
+      end
+
+      it 'propagates finish_reason=content_filter through to the assembled Message' do
+        content_data = { 'id' => 'c1', 'model' => 'qwen',
+                         'choices' => [{ 'delta' => { 'content' => '' },
+                                         'finish_reason' => 'content_filter' }] }
+
+        chunk = provider.send(:build_chunk, content_data)
+        expect(chunk).to be_a(Legion::Extensions::Llm::Chunk)
+        expect(chunk.stop_reason).to eq(:content_filter)
+
+        accumulator = Legion::Extensions::Llm::StreamAccumulator.new
+        accumulator.add(chunk)
+        message = accumulator.to_message(nil)
+        expect(message.stop_reason).to eq(:content_filter)
+      end
+
+      it 'propagates finish_reason=tool_calls as :tool_use through to the assembled Message' do
+        tool_data = { 'id' => 'c1', 'model' => 'qwen',
+                      'choices' => [{ 'delta' => { 'tool_calls' => [
+                        { 'id' => 'call_99', 'index' => 0,
+                          'function' => { 'name' => 'search', 'arguments' => '{}' } }
+                      ] }, 'finish_reason' => 'tool_calls' }] }
+        chunk = provider.send(:build_chunk, tool_data)
+        expect(chunk.stop_reason).to eq(:tool_use)
+
+        accumulator = Legion::Extensions::Llm::StreamAccumulator.new
+        accumulator.add(chunk)
+        expect(accumulator.to_message(nil).stop_reason).to eq(:tool_use)
+      end
+
+      it 'propagates finish_reason=stop as :end_turn (a clean stop) through to the assembled Message' do
+        content_data = { 'id' => 'c1', 'model' => 'qwen',
+                         'choices' => [{ 'delta' => { 'content' => '.' },
+                                         'finish_reason' => 'stop' }] }
+
+        chunk = provider.send(:build_chunk, content_data)
+        expect(chunk).to be_a(Legion::Extensions::Llm::Chunk)
+        expect(chunk.stop_reason).to eq(:end_turn)
+
+        accumulator = Legion::Extensions::Llm::StreamAccumulator.new
+        accumulator.add(chunk)
+        message = accumulator.to_message(nil)
+        expect(message.stop_reason).to eq(:end_turn)
+      end
+
+      it 'handles done chunk (empty delta + finish_reason) propagating stop_reason' do
+        done_data = { 'id' => 'c1', 'model' => 'qwen',
+                      'choices' => [{ 'delta' => {}, 'finish_reason' => 'length' }] }
+
+        chunk = provider.send(:build_chunk, done_data)
+        expect(chunk).to be_a(Legion::Extensions::Llm::Chunk)
+        expect(chunk.stop_reason).to eq(:max_tokens)
+
+        accumulator = Legion::Extensions::Llm::StreamAccumulator.new
+        accumulator.add(chunk)
+        expect(accumulator.stop_reason).to eq(:max_tokens)
+      end
+    end
   end
 end

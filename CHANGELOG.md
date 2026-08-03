@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.3.16] - 2026-07-31
+
+### Fixed
+- **`parse_chunk` now handles multiple tool_calls batched in a single SSE delta.** vLLM can batch several parallel tool_calls into one `choices[0].delta.tool_calls` array. Previously only `tool_calls.first` was processed — the 2nd+ tool calls were silently dropped, causing parallel tool invocations to lose calls. Now returns an array of `tool_call_delta` chunks (one per tool_call), which the streaming handler already iterates (per lex-llm 0.6.13). Single tool_call deltas still return a single chunk (not wrapped in an array) for backward compatibility.
+
+## [0.3.15] - 2026-07-31
+
+### Fixed
+- **`to_legacy_chunk` now propagates `stop_reason` from canonical chunks.** The canonical translator correctly parsed vLLM's `finish_reason` into `Canonical::Chunk.stop_reason`, but `to_legacy_chunk` never passed it into the legacy `Legion::Extensions::Llm::Chunk` constructor. The `StreamAccumulator` already reads `chunk.stop_reason` (line 40), so the field was silently nil on every streamed chunk — downstream always defaulted to `:end_turn` regardless of what the provider actually said. Truncated responses (`:max_tokens`) and content-filtered responses (`:content_filter`) were indistinguishable from clean completions. Now the real finish_reason flows through: canonical chunk → legacy chunk → accumulator → assembled Message.
+
 ## [0.3.14] - 2026-07-24
 
 ### Fixed
