@@ -371,7 +371,9 @@ module Legion
           # Map a canonical tool_call_delta onto the legacy chunk tool_calls hash.
           # Fragment semantics matter: an entry with a non-nil id starts a new tool
           # call in the StreamAccumulator; a nil id appends the raw arguments
-          # fragment to the most recently started call.
+          # fragment to the call at its wire index (block_index). Carrying the
+          # index is what lets the accumulator correlate interleaved parallel
+          # fragments to the right call instead of falling back to recency.
           def legacy_chunk_tool_calls(canonical)
             return nil unless canonical.type == :tool_call_delta && canonical.tool_call
 
@@ -381,7 +383,8 @@ module Legion
               key => Legion::Extensions::Llm::ToolCall.new(
                 id: tc.id,
                 name: tc.name,
-                arguments: tc.arguments
+                arguments: tc.arguments,
+                index: canonical.block_index
               )
             }
           end

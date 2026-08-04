@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.3.17] - 2026-08-04
+
+### Fixed
+- Preserve each streamed tool call's wire index when bridging canonical vLLM chunks to legacy chunks, allowing `lex-llm` 0.6.16 to correlate interleaved argument fragments for parallel tool calls instead of attaching them by recency.
+
 ## [0.3.16] - 2026-07-31
 
 ### Fixed
