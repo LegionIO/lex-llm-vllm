@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.4.0] - 2026-08-13
+
+### Changed
+- **SSOT v3 provider migration.** Rewrite `DiscoveryRefresh` actor to publish exact vLLM instances through the lex-llm 0.7.0 `Inventory::Publisher` contract. Each configured vLLM server now claims an independent exact `InstanceKey`, builds complete `OfferingDraft` snapshots with honest per-operation evidence, gates selector visibility behind immediate `/health` readiness, and supports probe-cleared exact-instance availability.
+- Raise `lex-llm` gemspec floor to `>= 0.7.0`.
+- Remove all `Legion::LLM::Call::Registry` reverse references; discovery no longer scans loaded providers through the coordinator.
+- Remove `ScopedRefresher` mixin and `compose_id` delimiter lane IDs; use canonical `lane:v1:` SHA-256 framed identity.
+- Derive stable InstanceKey per independently addressable vLLM server: normalized `host:port` plus non-secret auth fingerprint.
+- Normalize dispatch errors via `ProviderOutcome`; only an explicit flat service-unavailable (never raw 503/timeout/connection error) may return `instance_unavailable`.
+- Advertise `exact_offering_v1` fleet execution contract with exact offering/operation/model/instance verification.
+- Register `discovery_interval: 300` as a documented extension default; read directly without `.dig`/`||` fallback guards.
+- Add comprehensive SSOT v3 conformance specs including the shared `'an SSOT v3 provider adapter'` examples.
+
 ## [0.3.17] - 2026-08-04
 
 ### Fixed

@@ -10,6 +10,8 @@ module Legion
       module Vllm
         module Runners
           # Runner entrypoint for vLLM fleet request execution.
+          # Delegates to the shared ProviderResponder with exact-offering
+          # registry support for SSOT v3 execution contracts.
           module FleetWorker
             include Legion::Logging::Helper
             extend Legion::Logging::Helper
@@ -27,6 +29,7 @@ module Legion
                 provider_family: Vllm::PROVIDER_FAMILY,
                 provider_class: Vllm::Provider,
                 provider_instances: -> { Vllm.discover_instances },
+                registry: Legion::Extensions::Llm::Inventory::Registry,
                 delivery: delivery,
                 properties: properties
               )

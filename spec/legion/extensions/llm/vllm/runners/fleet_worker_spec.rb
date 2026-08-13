@@ -29,6 +29,7 @@ RSpec.describe Legion::Extensions::Llm::Vllm::Runners::FleetWorker do
       provider_family: :vllm,
       provider_class: Legion::Extensions::Llm::Vllm::Provider,
       provider_instances: satisfy { |resolver| resolver.call == instances },
+      registry: Legion::Extensions::Llm::Inventory::Registry,
       delivery: delivery,
       properties: properties
     )
