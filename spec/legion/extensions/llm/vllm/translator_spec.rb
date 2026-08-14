@@ -33,29 +33,35 @@ RSpec.describe Legion::Extensions::Llm::Vllm::Translator do
   end
 
   describe '#render_request' do
+    # Build a conformance fixture that always carries a selected model in metadata.
+    # §9: the executor selects an exact model before render_request is called; specs
+    # must mirror that invariant so the translator's ArgumentError guard is never
+    # tripped by missing test data.
+    def fixture_with_model(name, model: 'gemma-3-27b')
+      base = Canonical::Conformance.fixture_symbolized(name)
+      base.merge(metadata: { model: model })
+    end
+
     it 'includes model from metadata' do
       req = canonical::Request.build(messages: [], metadata: { model: 'my-vllm-model' })
       expect(translator.render_request(req)[:model]).to eq('my-vllm-model')
     end
 
     it 'renders system prompt as first system message' do
-      conformance = Canonical::Conformance
-      req = canonical::Request.from_hash(conformance.fixture_symbolized('canonical_system_prompt_request'))
+      req = canonical::Request.from_hash(fixture_with_model('canonical_system_prompt_request'))
       wire = translator.render_request(req)
       expect(wire[:messages].first[:role]).to eq('system')
     end
 
     it 'renders tools in OpenAI function format' do
-      conformance = Canonical::Conformance
-      req = canonical::Request.from_hash(conformance.fixture_symbolized('canonical_tools_request'))
+      req = canonical::Request.from_hash(fixture_with_model('canonical_tools_request'))
       wire = translator.render_request(req)
       expect(wire[:tools]).to be_an(Array)
       expect(wire[:tools].first[:function][:name]).to eq('get_weather')
     end
 
     it 'maps G18 params to wire format' do
-      conformance = Canonical::Conformance
-      req = canonical::Request.from_hash(conformance.fixture_symbolized('canonical_params_mapping_request'))
+      req = canonical::Request.from_hash(fixture_with_model('canonical_params_mapping_request'))
       wire = translator.render_request(req)
 
       expect(wire[:max_tokens]).to eq(2048)
@@ -66,15 +72,12 @@ RSpec.describe Legion::Extensions::Llm::Vllm::Translator do
     end
 
     it 'enables thinking via chat_template_kwargs when config has enable_thinking' do
-      conformance = Canonical::Conformance
-      req = canonical::Request.from_hash(conformance.fixture_symbolized('canonical_thinking_request'))
+      req = canonical::Request.from_hash(fixture_with_model('canonical_thinking_request'))
       expect(config_translator.render_request(req)[:chat_template_kwargs]).to eq(enable_thinking: true)
     end
 
     it 'renders tool_choice as named function for explicit choice' do
-      conformance = Canonical::Conformance
-      base = conformance.fixture_symbolized('canonical_tools_request')
-      fixture = base.merge('tool_choice' => { name: 'get_weather' })
+      fixture = fixture_with_model('canonical_tools_request').merge('tool_choice' => { name: 'get_weather' })
       req = canonical::Request.from_hash(fixture)
       wire = translator.render_request(req)
       expect(wire[:tool_choice]).to eq(type: 'function', function: { name: 'get_weather' })
