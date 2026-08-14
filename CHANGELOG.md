@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.4.1] - 2026-08-13
+
+### Fixed
+- **§8 health firewall enforced in harness and callable.** `instance_unavailable_error` now returns an explicit vLLM offline HTTP 503 response (body contains "server is going offline"); `classify_server_error_ext` detects this specific body text to return `:instance_unavailable`. Connection failures, generic 503s, and timeouts are never promoted to `:instance_unavailable`. Adds a firewall proof test.
+- **Removed all `rubocop:disable` directives** from `provider.rb` and the conformance spec. All metrics (AbcSize, ParameterLists, CyclomaticComplexity, PerceivedComplexity, ModuleLength) resolved by extraction instead of suppression.
+- **`provider.rb` ParameterLists compliance.** `build_canonical_request` and `render_payload` now use `**opts` passthrough, reducing explicit parameter lists to ≤5.
+- **`discovery_refresh.rb` ParameterLists compliance.** `store_instance_state` uses `**opts` for the trailing group of mutable-state params.
+- **`DiscoveryRefreshEvidenceBuilders` ModuleLength compliance.** Value-evidence methods (`build_context_evidence`, `build_max_output_evidence`, `build_embedding_dimensions_evidence`, `build_model_revision_evidence`, `build_tokenizer_evidence`, and helpers) extracted to new `DiscoveryRefreshValueEvidenceHelpers` module.
+- **Conformance spec `MultipleMemoizedHelpers` compliance.** Removed the file-level `rubocop:disable/enable` wrapper; all four over-limit describe blocks reduced to ≤3 lets per group by converting extras to `def` methods or consolidating into a `setup` hash let.
+- **`offering_attrs` uses `provider_instance_id`**, not `config.instance_id` (which does not exist on `Legion::Extensions::Llm::Configuration`).
+
 ## [0.4.0] - 2026-08-13
 
 ### Changed

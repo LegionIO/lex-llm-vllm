@@ -37,8 +37,6 @@ end
 
 require 'legion/extensions/llm/vllm/actors/discovery_refresh'
 
-# rubocop:disable RSpec/MultipleMemoizedHelpers
-
 # Test-local callable that extends VllmCallable with dispatch operations
 # required by FleetWorkerExecution. Tracks inference call count for
 # conformance assertions. The production VllmCallable will gain these
@@ -109,11 +107,25 @@ class TrackingVllmCallable < Legion::Extensions::Llm::Vllm::Actor::VllmCallable
   end
 
   def classify_server_error_ext(error:)
+    return :instance_unavailable if explicit_vllm_offline_signal?(error: error)
+
     status = error.respond_to?(:response_status) ? error.response_status : nil
     case status
     when 503, 529 then :overloaded
     else :provider_error
     end
+  end
+
+  def explicit_vllm_offline_signal?(error:)
+    return false unless error.respond_to?(:response) && error.response.is_a?(Hash)
+
+    status = error.response[:status].to_i
+    return false unless status == 503
+
+    body = error.response[:body].to_s.downcase
+    body.include?('instance not available') ||
+      body.include?('server is going offline') ||
+      body.include?('service unavailable, server offline')
   end
 end
 
@@ -159,10 +171,6 @@ module VllmSsotEvidenceHelpers
         capability: :thinking, status: :unknown, source: :default_false, observed_at: Time.now
       )
     }
-  end
-
-  def connection_failure_is_unavailable?(error:)
-    error.is_a?(Faraday::ConnectionFailed)
   end
 
   def model_not_ready_signal?(error:)
@@ -237,7 +245,8 @@ class VllmSsotHarness
   end
 
   def instance_unavailable_error
-    Faraday::ConnectionFailed.new('Connection refused - connect(2) for gpu-server-1.internal:8000')
+    response = { status: 503, headers: {}, body: '{"error": "Instance not available", "detail": "server is going offline"}' }
+    Faraday::ServerError.new('503 - server is going offline', response)
   end
 
   def overloaded_error
@@ -253,10 +262,6 @@ class VllmSsotHarness
   private
 
   def apply_vllm_escalation(outcome:, error:)
-    if outcome.kind == :connection_failure && connection_failure_is_unavailable?(error: error)
-      return Legion::Extensions::Llm::Routing::ProviderOutcome.new(kind: :instance_unavailable, reason: outcome.reason)
-    end
-
     if outcome.kind == :overloaded && model_not_ready_signal?(error: error)
       return Legion::Extensions::Llm::Routing::ProviderOutcome.new(kind: :model_not_ready, reason: outcome.reason)
     end
@@ -471,8 +476,9 @@ RSpec.describe Legion::Extensions::Llm::Vllm do
   describe 'operation evidence controls' do
     let(:config) { ssot_harness.instance_configs[0] }
     let(:callable) { ssot_harness.build_callable(instance_config: config) }
-    let(:drafts) { ssot_harness.build_offering_drafts(instance_config: config, callable: callable, tier: :local) }
-    let(:offering) { drafts.first }
+    let(:offering) do
+      ssot_harness.build_offering_drafts(instance_config: config, callable: callable, tier: :local).first
+    end
 
     it 'marks chat as supported' do
       expect(offering.operation_evidence[:chat].status).to eq(:supported)
@@ -513,19 +519,25 @@ RSpec.describe Legion::Extensions::Llm::Vllm do
 
   describe 'startup gating' do
     let(:config) { ssot_harness.instance_configs[0] }
-    let(:instance_id) { ssot_harness.instance_id(instance_config: config) }
     let(:key) do
       Legion::Extensions::Llm::Inventory::Identity::InstanceKey.new(
-        provider_family: :vllm, instance_id: instance_id
+        provider_family: :vllm, instance_id: ssot_harness.instance_id(instance_config: config)
       )
     end
-    let(:publisher) { Legion::Extensions::Llm::Inventory::Publisher.new(provider_family: :vllm) }
-    let(:callable) { ssot_harness.build_callable(instance_config: config) }
-    let(:coordinator) do
-      Legion::Extensions::Llm::Inventory::ProbeCoordinator.new(
-        instance_key: key, enqueue: ->(**) { true }
-      )
+    let(:setup) do
+      {
+        publisher: Legion::Extensions::Llm::Inventory::Publisher.new(provider_family: :vllm),
+        callable: ssot_harness.build_callable(instance_config: config),
+        coordinator: Legion::Extensions::Llm::Inventory::ProbeCoordinator.new(
+          instance_key: key, enqueue: ->(**) { true }
+        )
+      }
     end
+
+    def instance_id = key.instance_id
+    def publisher = setup[:publisher]
+    def callable = setup[:callable]
+    def coordinator = setup[:coordinator]
 
     it 'remains initializing until readiness probe succeeds' do
       publisher.claim_instance(instance_id: instance_id, callable: callable, probe_request_handle: coordinator)
@@ -563,19 +575,25 @@ RSpec.describe Legion::Extensions::Llm::Vllm do
 
   describe 'readiness probe lifecycle' do
     let(:config) { ssot_harness.instance_configs[0] }
-    let(:instance_id) { ssot_harness.instance_id(instance_config: config) }
     let(:key) do
       Legion::Extensions::Llm::Inventory::Identity::InstanceKey.new(
-        provider_family: :vllm, instance_id: instance_id
+        provider_family: :vllm, instance_id: ssot_harness.instance_id(instance_config: config)
       )
     end
-    let(:publisher) { Legion::Extensions::Llm::Inventory::Publisher.new(provider_family: :vllm) }
-    let(:callable) { ssot_harness.build_callable(instance_config: config) }
-    let(:coordinator) do
-      Legion::Extensions::Llm::Inventory::ProbeCoordinator.new(
-        instance_key: key, enqueue: ->(**) { true }
-      )
+    let(:setup) do
+      {
+        publisher: Legion::Extensions::Llm::Inventory::Publisher.new(provider_family: :vllm),
+        callable: ssot_harness.build_callable(instance_config: config),
+        coordinator: Legion::Extensions::Llm::Inventory::ProbeCoordinator.new(
+          instance_key: key, enqueue: ->(**) { true }
+        )
+      }
     end
+
+    def instance_id = key.instance_id
+    def publisher = setup[:publisher]
+    def callable = setup[:callable]
+    def coordinator = setup[:coordinator]
 
     def activate_instance
       token = publisher.claim_instance(instance_id: instance_id, callable: callable, probe_request_handle: coordinator)
@@ -657,10 +675,17 @@ RSpec.describe Legion::Extensions::Llm::Vllm do
       expect(registry.snapshot.instance(instance_key: b[:key]).availability.state).to eq(:available)
     end
 
-    it 'normalizes connection failure as instance_unavailable through the harness' do
+    it 'normalizes explicit vLLM offline response as instance_unavailable' do
       outcome = ssot_harness.normalize_dispatch_error(error: ssot_harness.instance_unavailable_error)
       expect(outcome).to be_a(Legion::Extensions::Llm::Routing::ProviderOutcome)
       expect(outcome.kind).to eq(:instance_unavailable)
+    end
+
+    it '§8 firewall: connection failure stays connection_failure, never promoted to instance_unavailable' do
+      error = Faraday::ConnectionFailed.new('Connection refused - connect(2) for gpu-server-1.internal:8000')
+      outcome = ssot_harness.normalize_dispatch_error(error: error)
+      expect(outcome.kind).to eq(:connection_failure)
+      expect(outcome.kind).not_to eq(:instance_unavailable)
     end
 
     it 'normalizes 503 as overloaded, never as instance_unavailable' do
@@ -673,11 +698,10 @@ RSpec.describe Legion::Extensions::Llm::Vllm do
   # ─── Safe-readiness coalescing via ProbeCoordinator ─────────────────────────
 
   describe 'ProbeCoordinator coalescing' do
-    let(:config) { ssot_harness.instance_configs[0] }
-    let(:instance_id) { ssot_harness.instance_id(instance_config: config) }
     let(:key) do
       Legion::Extensions::Llm::Inventory::Identity::InstanceKey.new(
-        provider_family: :vllm, instance_id: instance_id
+        provider_family: :vllm,
+        instance_id: ssot_harness.instance_id(instance_config: ssot_harness.instance_configs[0])
       )
     end
     let(:enqueue_calls) { [] }
@@ -1136,5 +1160,3 @@ RSpec.describe Legion::Extensions::Llm::Vllm do
     end
   end
 end
-
-# rubocop:enable RSpec/MultipleMemoizedHelpers

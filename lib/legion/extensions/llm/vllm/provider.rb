@@ -213,25 +213,35 @@ module Legion
             build_offering(model_info, policy, ctx, health)
           end
 
-          def build_offering(model_info, policy, ctx, health) # rubocop:disable Metrics/AbcSize
-            max_out = model_info.respond_to?(:max_output_tokens) ? model_info.max_output_tokens : nil
-            usage_type = policy[:capabilities].include?(:embedding) ? :embedding : :inference
+          def build_offering(model_info, policy, ctx, health)
+            Legion::Extensions::Llm::Routing::ModelOffering.new(**offering_attrs(model_info, policy, ctx, health))
+          end
 
-            Legion::Extensions::Llm::Routing::ModelOffering.new(
+          def offering_attrs(model_info, policy, ctx, health)
+            {
               provider_family: :vllm,
-              instance_id: config.respond_to?(:instance_id) ? config.instance_id : :default,
+              instance_id: provider_instance_id,
               transport: offering_transport,
               tier: offering_tier,
               model: model_info.id,
-              canonical_model_alias: model_info.respond_to?(:name) ? model_info.name : nil,
-              model_family: model_info.respond_to?(:family) ? model_info.family : nil,
-              usage_type: usage_type,
+              canonical_model_alias: optional_model_attr(model_info, :name),
+              model_family: optional_model_attr(model_info, :family),
+              usage_type: usage_type_for(policy),
               capabilities: policy[:capabilities],
               capability_sources: policy[:sources],
-              limits: { context_window: ctx, max_output_tokens: max_out }.compact,
+              limits: { context_window: ctx,
+                        max_output_tokens: optional_model_attr(model_info, :max_output_tokens) }.compact,
               health: health,
               metadata: offering_metadata_for(model_info).merge(capability_sources: policy[:sources])
-            )
+            }
+          end
+
+          def usage_type_for(policy)
+            policy[:capabilities].include?(:embedding) ? :embedding : :inference
+          end
+
+          def optional_model_attr(model_info, attr)
+            model_info.respond_to?(attr) ? model_info.public_send(attr) : nil
           end
 
           def extract_real_capabilities(model_info)
@@ -258,92 +268,102 @@ module Legion
 
           # ── Canonical bridge: legacy provider API → Canonical::Request ──
 
-          # rubocop:disable Metrics/ParameterLists, Metrics/AbcSize, Metrics/CyclomaticComplexity, Metrics/PerceivedComplexity -- bridge method can be complex
-          def build_canonical_request(
-            messages:, tools:, temperature:, model:, stream:, schema:, thinking:, tool_prefs:
-          )
-            model_id = model.respond_to?(:id) ? model.id : model.to_s
+          def build_canonical_request(messages:, **opts)
+            tools = opts[:tools]
+            temperature = opts[:temperature]
+            model      = opts[:model]
+            stream     = opts[:stream]
+            schema     = opts[:schema]
+            thinking   = opts[:thinking]
+            tool_prefs = opts[:tool_prefs]
+            Canonical::Request.build(
+              messages: build_canonical_messages(messages),
+              system: extract_system_prompt(messages),
+              tools: build_canonical_tools(tools),
+              tool_choice: format_tool_choice_from_prefs(tool_prefs),
+              params: build_canonical_params(temperature: temperature, schema: schema),
+              thinking: build_canonical_thinking(thinking),
+              stream: stream,
+              metadata: { model: extract_model_id(model) }
+            )
+          end
 
-            canonical_messages = messages.filter_map do |msg|
-              Canonical::Message.from_hash(msg.to_h) if msg.respond_to?(:to_h)
-            end
+          def extract_model_id(model)
+            model.respond_to?(:id) ? model.id : model.to_s
+          end
 
-            canonical_tools = tools.to_h.transform_values do |tool|
+          def build_canonical_messages(messages)
+            messages.filter_map { |msg| Canonical::Message.from_hash(msg.to_h) if msg.respond_to?(:to_h) }
+          end
+
+          def build_canonical_tools(tools)
+            tools.to_h.transform_values do |tool|
               if tool.is_a?(Canonical::ToolDefinition)
                 tool
               else
                 Canonical::ToolDefinition.from_hash(tool.respond_to?(:to_h) ? tool.to_h : tool)
               end
             end
+          end
 
-            params_hash = { temperature: temperature }
-            params_hash[:response_format] = schema if schema
-            canonical_params = Canonical::Params.from_hash(params_hash)
+          def build_canonical_params(temperature:, schema:)
+            hash = { temperature: temperature }
+            hash[:response_format] = schema if schema
+            Canonical::Params.from_hash(hash)
+          end
 
-            canonical_thinking = if thinking.respond_to?(:enabled?) && thinking.enabled?
-                                   Canonical::Thinking::Config.new(
-                                     effort: thinking.respond_to?(:effort) ? thinking.effort : nil
-                                   )
-                                 elsif thinking.is_a?(Hash)
-                                   Canonical::Thinking::Config.new(
-                                     effort: thinking[:effort] || thinking['effort'],
-                                     budget: thinking[:budget] || thinking['budget']
-                                   )
-                                 end
+          def build_canonical_thinking(thinking)
+            return thinking_config_from_object(thinking) if thinking.respond_to?(:enabled?) && thinking.enabled?
 
-            # Tool choice from tool_prefs
-            tool_choice = format_tool_choice_from_prefs(tool_prefs)
+            thinking_config_from_hash(thinking) if thinking.is_a?(Hash)
+          end
 
-            Canonical::Request.build(
-              messages: canonical_messages,
-              system: extract_system_prompt(messages),
-              tools: canonical_tools,
-              tool_choice: tool_choice,
-              params: canonical_params,
-              thinking: canonical_thinking,
-              stream: stream,
-              metadata: { model: model_id }
+          def thinking_config_from_object(thinking)
+            Canonical::Thinking::Config.new(effort: thinking.respond_to?(:effort) ? thinking.effort : nil)
+          end
+
+          def thinking_config_from_hash(thinking)
+            Canonical::Thinking::Config.new(
+              effort: thinking[:effort] || thinking['effort'],
+              budget: thinking[:budget] || thinking['budget']
             )
           end
-          # rubocop:enable Metrics/ParameterLists, Metrics/AbcSize, Metrics/CyclomaticComplexity, Metrics/PerceivedComplexity
 
           # ── Canonical bridge: Canonical→legacy Message/Chunk ──
 
-          # rubocop:disable Metrics/AbcSize, Metrics/CyclomaticComplexity, Metrics/PerceivedComplexity -- verbose bridge
           def to_legacy_message(canonical, raw_body, _raw_response)
-            thinking = nil
-            if canonical.thinking
-              thinking = Thinking.build(
-                text: canonical.thinking.content,
-                signature: canonical.thinking.signature
-              )
-            end
-
-            tool_calls = {}
-            canonical.tool_calls.each do |tc|
-              key = (tc.name || tc.id).to_s.to_sym
-              tool_calls[key] = Legion::Extensions::Llm::ToolCall.new(
-                id: tc.id,
-                name: tc.name,
-                arguments: tc.arguments
-              )
-            end
-
             usage = canonical.usage || {}
-
             Legion::Extensions::Llm::Message.new(
               role: :assistant,
               content: canonical.text,
               model_id: canonical.model,
-              tool_calls: tool_calls.empty? ? nil : tool_calls,
-              thinking: thinking,
-              input_tokens: usage.respond_to?(:input_tokens) ? usage.input_tokens : nil,
-              output_tokens: usage.respond_to?(:output_tokens) ? usage.output_tokens : nil,
-              reasoning_tokens: usage.respond_to?(:thinking_tokens) ? usage.thinking_tokens : nil,
+              tool_calls: legacy_tool_calls_hash(canonical),
+              thinking: legacy_thinking(canonical),
+              input_tokens: optional_usage_attr(usage, :input_tokens),
+              output_tokens: optional_usage_attr(usage, :output_tokens),
+              reasoning_tokens: optional_usage_attr(usage, :thinking_tokens),
               raw: raw_body
             )
           end
-          # rubocop:enable Metrics/AbcSize, Metrics/CyclomaticComplexity, Metrics/PerceivedComplexity
+
+          def legacy_thinking(canonical)
+            return nil unless canonical.thinking
+
+            Thinking.build(text: canonical.thinking.content, signature: canonical.thinking.signature)
+          end
+
+          def legacy_tool_calls_hash(canonical)
+            result = {}
+            canonical.tool_calls.each do |tc|
+              key = (tc.name || tc.id).to_s.to_sym
+              result[key] = Legion::Extensions::Llm::ToolCall.new(id: tc.id, name: tc.name, arguments: tc.arguments)
+            end
+            result.empty? ? nil : result
+          end
+
+          def optional_usage_attr(usage, attr)
+            usage.respond_to?(attr) ? usage.public_send(attr) : nil
+          end
 
           def to_legacy_chunk(canonical, raw_data)
             usage = canonical&.usage || {}
@@ -401,29 +421,33 @@ module Legion
             { name: choice.to_s }
           end
 
-          # rubocop:disable Metrics/CyclomaticComplexity, Metrics/PerceivedComplexity -- multibranch guard chain for system parsing
           def extract_system_prompt(messages)
-            return nil unless messages.is_a?(Array)
-            return nil if messages.empty?
+            return nil unless messages.is_a?(Array) && !messages.empty?
 
             first = messages.first
-            return nil unless first
+            return nil unless first && system_message?(first)
 
-            role = first.respond_to?(:role) ? first.role.to_sym : (first[:role] || first['role'])
-            return nil unless [:system, 'system'].include?(role)
+            message_content_string(first)
+          end
 
-            content = first.respond_to?(:content) ? first.content : (first[:content] || first['content'])
+          def system_message?(msg)
+            role = msg.respond_to?(:role) ? msg.role.to_sym : message_hash_role(msg)
+            [:system, 'system'].include?(role)
+          end
+
+          def message_hash_role(msg)
+            msg[:role] || msg['role']
+          end
+
+          def message_content_string(msg)
+            content = msg.respond_to?(:content) ? msg.content : (msg[:content] || msg['content'])
             content.is_a?(String) ? content : nil
           end
-          # rubocop:enable Metrics/CyclomaticComplexity, Metrics/PerceivedComplexity
 
-          def render_payload(messages, tools:, temperature:, model:, stream:, schema:, thinking:, tool_prefs:) # rubocop:disable Metrics/ParameterLists
+          def render_payload(messages, **)
             # Build a canonical request from provider call parameters,
             # then delegate to the translator for wire-format rendering.
-            canonical_req = build_canonical_request(
-              messages:, tools:, temperature:, model:, stream:,
-              schema:, thinking:, tool_prefs:
-            )
+            canonical_req = build_canonical_request(messages: messages, **)
             wire = translator.render_request(canonical_req)
 
             log.debug do
