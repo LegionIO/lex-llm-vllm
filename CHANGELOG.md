@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.4.2] - 2026-08-13
+
+### Fixed
+- **Removed ALL remaining `rubocop:disable` directives** — zero directives across `lib/` and `spec/`. Every suppressed metric resolved by real refactoring: `translator.rb` split into 9 focused modules (`TranslatorMessageHelpers`, `TranslatorToolCallHelpers`, `TranslatorToolHelpers`, `TranslatorParamHelpers`, `TranslatorThinkingHelpers`, `TranslatorToolCallParseHelpers`, `TranslatorResponseHelpers`, `TranslatorChunkBuilderHelpers`, `TranslatorChunkHelpers`, `TranslatorRenderHelpers`), bringing every class/module under the 100-line limit.
+- **Reverted `.rubocop.yml` weakening** — removed `Metrics/ClassLength: Exclude` for `provider.rb` added in prior pass; class genuinely reduced by module extraction.
+- **§9 default substitution removed** — `translator.rb` `extract_wire_model` now raises `ArgumentError` when no model is present rather than substituting `'default'`.
+- **§1 settings guards removed** — `global_thinking_enabled?` in `provider.rb` no longer uses `defined?(Legion::Settings)` or `Legion::Settings.dig`; replaced with `settings[:enable_thinking]` bracket access.
+- **§1 swallowed rescue fixed** — `extract_host_port` in `discovery_refresh.rb` now calls `handle_exception` instead of silently swallowing `URI::InvalidURIError`.
+- **Settings-authoritative embedding removed** — `embedding_supported?` in `discovery_refresh.rb` uses only server evidence (`model_data[:type]` or `model_data[:capabilities]`); `instance_cfg:` parameter eliminated.
+- **`api_base` correctly navigates instance settings** — reads `settings.dig(:instances, :default, :endpoint)` (the registered default) instead of the non-existent top-level `settings[:endpoint]` key.
+- **Ruby constant lexical scope fixed** — `SUPPORTED_PARAMS`, `PARAM_WIRE_KEYS`, and `FALLBACK_STOP_REASON` moved into the modules that reference them (`TranslatorParamHelpers` and `TranslatorChunkHelpers`) so constant lookup works correctly without the including class.
+- **`RSpec/SpecFilePathFormat` fixed** — `fleet_worker_spec.rb` moved from `spec/.../vllm/actors/` (plural) to `spec/.../vllm/actor/` (singular) to match the `Actor::FleetWorker` module path.
+- **Conformance fixtures updated** — all canonical request fixtures in `lex-llm` now include `"metadata": {"model": "test-fixture-model"}`, required for §9-compliant translators that raise on absent model.
+
 ## [0.4.1] - 2026-08-13
 
 ### Fixed

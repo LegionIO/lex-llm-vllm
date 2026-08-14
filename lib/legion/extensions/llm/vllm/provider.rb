@@ -8,105 +8,11 @@ module Legion
   module Extensions
     module Llm
       module Vllm
-        # vLLM provider implementation for the Legion::Extensions::Llm base provider contract.
-        class Provider < Legion::Extensions::Llm::Provider
-          include Legion::Extensions::Llm::Provider::OpenAICompatible
-          include Legion::Logging::Helper
+        # ── Management endpoint helpers (public) ─────────────────────────────
 
-          class << self
-            def slug = 'vllm'
-            def local? = false
-            def default_transport = :http
-            def default_tier = :direct
-            def configuration_options = %i[vllm_api_base vllm_api_key]
-            def configuration_requirements = []
-            def capabilities = Capabilities
-
-            def registry_publisher
-              Vllm.registry_publisher
-            end
-          end
-
-          # Capability predicates for vLLM OpenAI-compatible model offerings.
-          module Capabilities
-            module_function
-
-            def chat?(_model) = true
-            def streaming?(_model) = true
-            def vision?(_model) = false
-            def functions?(_model) = false
-            def embeddings?(_model) = false
-
-            def critical_capabilities_for(model)
-              [
-                ('streaming' if streaming?(model)),
-                ('function_calling' if functions?(model)),
-                ('vision' if vision?(model)),
-                ('embeddings' if embeddings?(model))
-              ].compact
-            end
-          end
-
-          def stream_usage_supported? = true
-
-          def settings
-            Vllm.default_settings
-          end
-
-          # Canonical translator instance — renders requests, parses responses/chunks.
-          def translator
-            @translator ||= Translator.new(config: config)
-          end
-
-          def api_base
-            normalize_url(config.vllm_api_base || settings[:endpoint] || 'http://localhost:8000')
-          end
-
-          def headers
-            hdrs = identity_headers
-            token = config.vllm_api_key
-            hdrs['Authorization'] = "Bearer #{token}" unless token.nil? || token.to_s.empty?
-            hdrs
-          end
-
-          def health_url = '/health'
-          def version_url = '/version'
-          def reset_prefix_cache_url = '/reset_prefix_cache'
-          def reset_mm_cache_url = '/reset_mm_cache'
-          def sleep_url = '/sleep'
-          def wake_up_url = '/wake_up'
-
-          def health(live: false)
-            log.info { "checking health live=#{live} at #{api_base}#{health_url}" }
-            super
-          end
-
-          def readiness(live: false)
-            log.info { "checking readiness live=#{live} at #{api_base}" }
-            super.tap do |metadata|
-              self.class.registry_publisher.publish_readiness_async(metadata) if live
-            end
-          end
-
-          def list_models(live: false, **filters)
-            log.info { "discovering models from #{api_base}#{models_url}" }
-            super.tap do |models|
-              log.info { "discovered #{models.size} model(s) from vLLM" }
-            end
-          end
-
-          def discover_offerings(live: false, **filters)
-            return filter_cached_offerings(Array(@cached_offerings), filters) unless live
-
-            provider_health = health(live:)
-            @cached_offerings = discover_live_offerings(filters, provider_health, live:)
-            log_discover_complete(@cached_offerings)
-            @cached_offerings
-          rescue StandardError => e
-            handle_exception(e, level: :warn, handled: true, operation: 'vllm.discover_offerings')
-            []
-          end
-
+        # Public methods for vLLM management/admin endpoints.
+        # Included into Provider to keep the class body within length limits.
+        module ProviderManagementMethods
           def version
             log.info { "fetching version from #{api_base}#{version_url}" }
             connection.get(version_url).body
@@ -136,6 +42,8 @@ module Legion
             connection.post(with_query(wake_up_url, query), {}).body
           end
 
+          private
+
           def fetch_model_detail(model_name)
             # vLLM provides context_length via /v1/models during discovery.
             # Re-fetch from the models endpoint if we need it outside discovery.
@@ -152,6 +60,18 @@ module Legion
             nil
           end
 
+          def with_query(path, positional = [], **params)
+            pairs = positional + params.compact.map { |key, value| [key.to_s, value] }
+            return path if pairs.empty?
+
+            "#{path}?#{URI.encode_www_form(pairs)}"
+          end
+        end
+
+        # ── Discovery + offering helpers (private) ────────────────────────────
+
+        # Private helpers for live offering discovery and capability resolution.
+        module ProviderDiscoveryHelpers
           private
 
           def discovery_registry_readiness(provider_health, live:)
@@ -191,15 +111,7 @@ module Legion
           end
 
           def offering_from_model(model_info, health: {})
-            ctx = model_info.context_length
-            if ctx
-              begin
-                cache_set(model_detail_cache_key(model_info.id), { context_window: ctx }, ttl: 86_400)
-              rescue StandardError => e
-                handle_exception(e, level: :warn, handled: true, operation: 'vllm.cache_model_detail')
-              end
-            end
-
+            cache_model_context(model_info)
             policy = Legion::Extensions::Llm::CapabilityPolicy.resolve(
               real: extract_real_capabilities(model_info),
               provider_catalog: {},
@@ -209,8 +121,16 @@ module Legion
               instance_config: instance_capability_config,
               model_config: model_capability_config(model_info.id)
             )
+            build_offering(model_info, policy, model_info.context_length, health)
+          end
 
-            build_offering(model_info, policy, ctx, health)
+          def cache_model_context(model_info)
+            ctx = model_info.context_length
+            return unless ctx
+
+            cache_set(model_detail_cache_key(model_info.id), { context_window: ctx }, ttl: 86_400)
+          rescue StandardError => e
+            handle_exception(e, level: :warn, handled: true, operation: 'vllm.cache_model_detail')
           end
 
           def build_offering(model_info, policy, ctx, health)
@@ -265,8 +185,13 @@ module Legion
               size_bytes: model_info.respond_to?(:size_bytes) ? model_info.size_bytes : nil
             }.compact
           end
+        end
 
-          # ── Canonical bridge: legacy provider API → Canonical::Request ──
+        # ── Canonical request bridge helpers (private) ────────────────────────
+
+        # Private helpers for converting provider call args into Canonical::Request.
+        module ProviderCanonicalRequestBridge
+          private
 
           def build_canonical_request(messages:, **opts)
             tools = opts[:tools]
@@ -329,7 +254,45 @@ module Legion
             )
           end
 
-          # ── Canonical bridge: Canonical→legacy Message/Chunk ──
+          def format_tool_choice_from_prefs(tool_prefs)
+            return nil unless tool_prefs
+
+            choice = tool_prefs[:choice] || tool_prefs['choice']
+            return nil unless choice
+            return choice.to_sym if %w[auto none required].include?(choice.to_s)
+
+            { name: choice.to_s }
+          end
+
+          def extract_system_prompt(messages)
+            return nil unless messages.is_a?(Array) && !messages.empty?
+
+            first = messages.first
+            return nil unless first && system_message?(first)
+
+            message_content_string(first)
+          end
+
+          def system_message?(msg)
+            role = msg.respond_to?(:role) ? msg.role.to_sym : message_hash_role(msg)
+            [:system, 'system'].include?(role)
+          end
+
+          def message_hash_role(msg)
+            msg[:role] || msg['role']
+          end
+
+          def message_content_string(msg)
+            content = msg.respond_to?(:content) ? msg.content : (msg[:content] || msg['content'])
+            content.is_a?(String) ? content : nil
+          end
+        end
+
+        # ── Legacy bridge helpers (private) ──────────────────────────────────
+
+        # Private helpers for converting Canonical responses back to legacy types.
+        module ProviderLegacyBridge
+          private
 
           def to_legacy_message(canonical, raw_body, _raw_response)
             usage = canonical.usage || {}
@@ -388,12 +351,6 @@ module Legion
             )
           end
 
-          # Map a canonical tool_call_delta onto the legacy chunk tool_calls hash.
-          # Fragment semantics matter: an entry with a non-nil id starts a new tool
-          # call in the StreamAccumulator; a nil id appends the raw arguments
-          # fragment to the call at its wire index (block_index). Carrying the
-          # index is what lets the accumulator correlate interleaved parallel
-          # fragments to the right call instead of falling back to recency.
           def legacy_chunk_tool_calls(canonical)
             return nil unless canonical.type == :tool_call_delta && canonical.tool_call
 
@@ -408,48 +365,17 @@ module Legion
               )
             }
           end
+        end
 
-          # ── Tool choice helpers ──
+        # ── Render + parse helpers (private) ─────────────────────────────────
 
-          def format_tool_choice_from_prefs(tool_prefs)
-            return nil unless tool_prefs
-
-            choice = tool_prefs[:choice] || tool_prefs['choice']
-            return nil unless choice
-            return choice.to_sym if %w[auto none required].include?(choice.to_s)
-
-            { name: choice.to_s }
-          end
-
-          def extract_system_prompt(messages)
-            return nil unless messages.is_a?(Array) && !messages.empty?
-
-            first = messages.first
-            return nil unless first && system_message?(first)
-
-            message_content_string(first)
-          end
-
-          def system_message?(msg)
-            role = msg.respond_to?(:role) ? msg.role.to_sym : message_hash_role(msg)
-            [:system, 'system'].include?(role)
-          end
-
-          def message_hash_role(msg)
-            msg[:role] || msg['role']
-          end
-
-          def message_content_string(msg)
-            content = msg.respond_to?(:content) ? msg.content : (msg[:content] || msg['content'])
-            content.is_a?(String) ? content : nil
-          end
+        # Private helpers for payload rendering, response parsing, and thinking.
+        module ProviderRenderParseHelpers
+          private
 
           def render_payload(messages, **)
-            # Build a canonical request from provider call parameters,
-            # then delegate to the translator for wire-format rendering.
             canonical_req = build_canonical_request(messages: messages, **)
             wire = translator.render_request(canonical_req)
-
             log.debug do
               "vLLM provider rendered wire payload model=#{wire[:model]} stream=#{wire[:stream]} " \
                 "messages=#{(wire[:messages] || []).size} keys=#{wire.keys.join(', ')}"
@@ -479,25 +405,15 @@ module Legion
           end
 
           def global_thinking_enabled?
-            return false unless defined?(Legion::Settings)
-
-            vllm = Legion::Settings.dig(:llm, :providers, :vllm)
-            return false unless vllm.is_a?(Hash)
-
-            vllm[:enable_thinking] == true || vllm['enable_thinking'] == true
+            settings[:enable_thinking] == true
           end
 
-          # Override: delegate completion response parsing to the canonical translator.
           def parse_completion_response(response)
             body = response.body
             canonical = translator.parse_response(body)
-
-            # Convert Canonical::Response back to the legacy Message/Chunk shape
-            # that the Provider base class expects (backward compat with existing callers).
             to_legacy_message(canonical, body, response)
           end
 
-          # Override: delegate SSE chunk parsing to the canonical translator.
           def build_chunk(data)
             result = translator.parse_chunk(data)
             return nil if result.nil?
@@ -524,12 +440,111 @@ module Legion
               )
             end
           end
+        end
 
-          def with_query(path, positional = [], **params)
-            pairs = positional + params.compact.map { |key, value| [key.to_s, value] }
-            return path if pairs.empty?
+        # ── Provider class ────────────────────────────────────────────────────
 
-            "#{path}?#{URI.encode_www_form(pairs)}"
+        # vLLM provider implementation for the Legion::Extensions::Llm base provider contract.
+        class Provider < Legion::Extensions::Llm::Provider
+          include Legion::Extensions::Llm::Provider::OpenAICompatible
+          include Legion::Logging::Helper
+          include ProviderManagementMethods
+          include ProviderDiscoveryHelpers
+          include ProviderCanonicalRequestBridge
+          include ProviderLegacyBridge
+          include ProviderRenderParseHelpers
+
+          class << self
+            def slug = 'vllm'
+            def local? = false
+            def default_transport = :http
+            def default_tier = :direct
+            def configuration_options = %i[vllm_api_base vllm_api_key]
+            def configuration_requirements = []
+            def capabilities = Capabilities
+
+            def registry_publisher
+              Vllm.registry_publisher
+            end
+          end
+
+          # Capability predicates for vLLM OpenAI-compatible model offerings.
+          module Capabilities
+            module_function
+
+            def chat?(_model) = true
+            def streaming?(_model) = true
+            def vision?(_model) = false
+            def functions?(_model) = false
+            def embeddings?(_model) = false
+
+            def critical_capabilities_for(model)
+              [
+                ('streaming' if streaming?(model)),
+                ('function_calling' if functions?(model)),
+                ('vision' if vision?(model)),
+                ('embeddings' if embeddings?(model))
+              ].compact
+            end
+          end
+
+          def stream_usage_supported? = true
+
+          def settings
+            Vllm.default_settings
+          end
+
+          def translator
+            @translator ||= Translator.new(config: config)
+          end
+
+          def api_base
+            normalize_url(config.vllm_api_base || settings.dig(:instances, :default, :endpoint))
+          end
+
+          def headers
+            hdrs = identity_headers
+            token = config.vllm_api_key
+            hdrs['Authorization'] = "Bearer #{token}" unless token.nil? || token.to_s.empty?
+            hdrs
+          end
+
+          def health_url = '/health'
+          def version_url = '/version'
+          def reset_prefix_cache_url = '/reset_prefix_cache'
+          def reset_mm_cache_url = '/reset_mm_cache'
+          def sleep_url = '/sleep'
+          def wake_up_url = '/wake_up'
+
+          def health(live: false)
+            log.info { "checking health live=#{live} at #{api_base}#{health_url}" }
+            super
+          end
+
+          def readiness(live: false)
+            log.info { "checking readiness live=#{live} at #{api_base}" }
+            super.tap do |metadata|
+              self.class.registry_publisher.publish_readiness_async(metadata) if live
+            end
+          end
+
+          def list_models(live: false, **filters)
+            log.info { "discovering models from #{api_base}#{models_url}" }
+            super.tap do |models|
+              log.info { "discovered #{models.size} model(s) from vLLM" }
+            end
+          end
+
+          def discover_offerings(live: false, **filters)
+            return filter_cached_offerings(Array(@cached_offerings), filters) unless live
+
+            provider_health = health(live:)
+            @cached_offerings = discover_live_offerings(filters, provider_health, live:)
+            log_discover_complete(@cached_offerings)
+            @cached_offerings
+          rescue StandardError => e
+            handle_exception(e, level: :warn, handled: true, operation: 'vllm.discover_offerings')
+            []
           end
         end
       end

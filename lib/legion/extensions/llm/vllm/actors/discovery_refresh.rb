@@ -289,7 +289,9 @@ module Legion
             def extract_host_port(url:)
               uri = URI.parse(url.to_s)
               "#{uri.host || 'localhost'}:#{uri.port}"
-            rescue URI::InvalidURIError
+            rescue URI::InvalidURIError => e
+              handle_exception(e, level: :warn, handled: true, operation: 'vllm.actor.extract_host_port',
+                                  url: url.to_s)
               'unknown:0'
             end
 
@@ -388,7 +390,7 @@ module Legion
 
             def build_offering_draft(model_id:, model_data:, instance_cfg:, instance_key:)
               tier          = instance_cfg[:tier] || :direct
-              embed_sup     = embedding_supported?(model_data: model_data, instance_cfg: instance_cfg)
+              embed_sup     = embedding_supported?(model_data: model_data)
               Legion::Extensions::Llm::Inventory::OfferingDraft.new(
                 provider_native_key: model_id, model: model_id, tier: tier,
                 operation_evidence: build_operation_evidence(embed_supported: embed_sup),
@@ -407,8 +409,8 @@ module Legion
               )
             end
 
-            def embedding_supported?(model_data:, instance_cfg:)
-              return true if instance_cfg.dig(:usage, :embedding) == true && model_data[:type].to_s == 'embedding'
+            def embedding_supported?(model_data:)
+              return true if model_data[:type].to_s == 'embedding'
               return true if model_data[:capabilities].is_a?(Array) && model_data[:capabilities].include?('embedding')
 
               false
