@@ -17,167 +17,49 @@ require 'legion/extensions/llm/capabilities'
 require 'legion/extensions/llm/fleet/worker_execution'
 require 'legion/extensions/llm/fleet/protocol'
 
-# Stub the actor runtime so discovery_refresh.rb loads the VllmCallable class.
+# Stub the actor runtime base class so the discovery actor loads in test
+# context (the real Every requires the full LegionIO runtime).
 module Legion
   module Extensions
     module Actors
       unless const_defined?(:Every, false)
-        # Stub base class for discovery actor loading in test context
         class Every
-          def self.every_seconds = 300
+          def initialize(*_args) = nil
         end
       end
     end
-
-    module Helpers
-      module Lex; end unless const_defined?(:Lex, false)
-    end
   end
 end
 
+# Load the production callable, the discovery actor, and the production
+# OfferingBuilder. The conformance spec exercises the REAL VllmCallable
+# (D1/D6) and DELEGATES draft-building to the production OfferingBuilder
+# (D16) — no test-only subclass or duplicated builder.
+require 'legion/extensions/llm/vllm/callable'
 require 'legion/extensions/llm/vllm/actors/discovery_refresh'
+require 'legion/extensions/llm/vllm/helpers/offering_builder'
 
-# Test-local callable that extends VllmCallable with dispatch operations
-# required by FleetWorkerExecution. Tracks inference call count for
-# conformance assertions. The production VllmCallable will gain these
-# methods during the migration; this subclass proves the contract.
-class TrackingVllmCallable < Legion::Extensions::Llm::Vllm::Actor::VllmCallable
-  attr_reader :call_count
-
-  def initialize(instance_cfg:, logger:)
-    super
-    @call_count = 0
-  end
-
-  def chat(model:, **)
-    @call_count += 1
-    { role: 'assistant', content: 'test response', model: model }
-  end
-
-  def stream_chat(model:, **)
-    @call_count += 1
-    { role: 'assistant', content: 'streamed response', model: model }
-  end
-
-  def embed(model:, **)
-    @call_count += 1
-    { embedding: [0.1, 0.2, 0.3], model: model }
-  end
-
-  def count_tokens(model:, **)
-    @call_count += 1
-    { token_count: 42, model: model }
-  end
-
-  # Extended normalize_dispatch_error that also handles lex-llm error types.
-  # The production VllmCallable will be updated to include these branches
-  # as part of the SSOT v3 migration.
-  def normalize_dispatch_error(error:)
-    reason = error.message.to_s[0, 512]
-    kind = classify_dispatch_error(error: error)
-
-    Legion::Extensions::Llm::Routing::ProviderOutcome.new(
-      kind: kind,
-      reason: reason.empty? ? 'unknown dispatch error' : reason
-    )
-  end
-
-  private
-
-  def classify_dispatch_error(error:)
-    case error
-    when Faraday::ConnectionFailed then :connection_failure
-    when Faraday::TimeoutError then :timeout
-    when Faraday::ClientError then classify_client_error_ext(error: error)
-    when Faraday::ServerError then classify_server_error_ext(error: error)
-    when Legion::Extensions::Llm::OverloadedError then :overloaded
-    else :provider_error
-    end
-  end
-
-  def classify_client_error_ext(error:)
-    status = error.respond_to?(:response_status) ? error.response_status : nil
-    case status
-    when 401 then :authentication
-    when 403 then :authorization
-    when 404 then :model_missing
-    when 429 then :rate_limited
-    else :invalid_request
-    end
-  end
-
-  def classify_server_error_ext(error:)
-    return :instance_unavailable if explicit_vllm_offline_signal?(error: error)
-
-    status = error.respond_to?(:response_status) ? error.response_status : nil
-    case status
-    when 503, 529 then :overloaded
-    else :provider_error
-    end
-  end
-
-  def explicit_vllm_offline_signal?(error:)
-    return false unless error.respond_to?(:response) && error.response.is_a?(Hash)
-
-    status = error.response[:status].to_i
-    return false unless status == 503
-
-    body = error.response[:body].to_s.downcase
-    body.include?('instance not available') ||
-      body.include?('server is going offline') ||
-      body.include?('service unavailable, server offline')
-  end
-end
-
-# Evidence-building helpers for the SSOT v3 conformance harness.
-# Extracted to keep VllmSsotHarness within class length limits.
+# Supporting helpers for the SSOT v3 conformance harness. Draft/evidence
+# building is DELEGATED to the production OfferingBuilder (see
+# VllmSsotHarness#build_offering_drafts) — only the error-body + identity
+# helpers that are specific to the spec remain here.
 module VllmSsotEvidenceHelpers
   private
 
-  def build_operation_evidence(now:, embed_supported:)
-    embed_status = embed_supported ? :supported : :unsupported
-    {
-      chat: op_evidence(:chat, :supported, now),
-      stream_chat: op_evidence(:stream_chat, :supported, now),
-      embed: op_evidence(:embed, embed_status, now),
-      image: op_evidence(:image, :unsupported, now),
-      transcribe: op_evidence(:transcribe, :unsupported, now),
-      translate: op_evidence(:translate, :unsupported, now),
-      speak: op_evidence(:speak, :unsupported, now),
-      moderate: op_evidence(:moderate, :unsupported, now),
-      count_tokens: op_evidence(:count_tokens, :unknown, now)
-    }
-  end
-
-  def op_evidence(operation, status, observed_at)
-    source = status == :unknown ? :default_false : :provider_implementation
-    Legion::Extensions::Llm::Inventory::OperationEvidence.new(
-      operation: operation, status: status, source: source, observed_at: observed_at
-    )
-  end
-
-  def build_capability_evidence
-    {
-      completion: Legion::Extensions::Llm::Inventory::CapabilityEvidence.new(
-        capability: :completion, status: :supported, source: :provider_implementation, observed_at: Time.now
-      ),
-      streaming: Legion::Extensions::Llm::Inventory::CapabilityEvidence.new(
-        capability: :streaming, status: :supported, source: :provider_implementation, observed_at: Time.now
-      ),
-      tools: Legion::Extensions::Llm::Inventory::CapabilityEvidence.new(
-        capability: :tools, status: :unknown, source: :default_false, observed_at: Time.now
-      ),
-      thinking: Legion::Extensions::Llm::Inventory::CapabilityEvidence.new(
-        capability: :thinking, status: :unknown, source: :default_false, observed_at: Time.now
-      )
-    }
-  end
-
   def model_not_ready_signal?(error:)
-    return false unless error.respond_to?(:response) && error.response.is_a?(Hash)
-
-    body = error.response[:body].to_s.downcase
+    body = error_response_body(error).downcase
     body.include?('model not ready') || body.include?('model is still loading')
+  end
+
+  # Read the HTTP body off a dispatch error regardless of whether its response
+  # is a plain Hash, a Faraday::Response, or a Faraday::Env (the real shape).
+  def error_response_body(error)
+    return error.response_body.to_s if error.respond_to?(:response_body) && !error.response_body.nil?
+
+    response = error.response if error.respond_to?(:response)
+    return response.body.to_s if response.respond_to?(:body) && !response.body.nil?
+
+    response[:body].to_s if response.respond_to?(:[]) && !response[:body].nil?
   end
 
   def extract_host_port(base_url:)
@@ -217,13 +99,25 @@ class VllmSsotHarness
   end
 
   def build_callable(instance_config:)
-    TrackingVllmCallable.new(instance_cfg: instance_config, logger: Logger.new(File::NULL))
+    Legion::Extensions::Llm::Vllm::VllmCallable.new(instance_cfg: instance_config, logger: Logger.new(File::NULL))
   end
 
-  def build_offering_drafts(tier: :local, **)
-    now = Time.now.freeze
+  # D16: delegate draft-building to the PRODUCTION OfferingBuilder (not a
+  # duplicated copy) so a bug in the real path (constant scope, NameError,
+  # malformed evidence) is exercised by the conformance spec rather than hidden
+  # by a stand-in. The kit's tier param is honored by overriding the instance
+  # tier; the instance_key is derived from the passed instance_config.
+  def build_offering_drafts(tier: :local, instance_config: nil, **)
+    cfg_source = instance_config || instance_configs.first
+    cfg = cfg_source.merge(tier: tier)
+    instance_key = Legion::Extensions::Llm::Inventory::Identity::InstanceKey.new(
+      provider_family: provider_family, instance_id: instance_id(instance_config: cfg_source)
+    )
+    builder = Legion::Extensions::Llm::Vllm::Helpers::OfferingBuilder.new(
+      instance_cfg: cfg, instance_key: instance_key
+    )
     model_id = 'meta-llama/Llama-3.1-8B-Instruct'
-    [build_single_offering(model_id: model_id, tier: tier, now: now)]
+    [builder.build(model_id: model_id, model_data: { id: model_id, max_model_len: 131_072 })]
   end
 
   def safe_readiness(instance_config:, **)
@@ -245,21 +139,36 @@ class VllmSsotHarness
   end
 
   def instance_unavailable_error
-    response = { status: 503, headers: {}, body: '{"error": "Instance not available", "detail": "server is going offline"}' }
-    Faraday::ServerError.new('503 - server is going offline', response)
+    server_error(
+      status: 503, body: '{"error": "Instance not available", "detail": "server is going offline"}',
+      message: '503 - server is going offline'
+    )
   end
 
   def overloaded_error
-    response = { status: 503, headers: {}, body: '{"error": "Server overloaded"}' }
-    Faraday::ServerError.new('the server responded with status 503', response)
+    server_error(status: 503, body: '{"error": "Server overloaded"}', message: 'the server responded with status 503')
   end
 
   def model_not_ready_error
-    response = { status: 503, headers: {}, body: '{"error": "Model not ready", "detail": "model is still loading"}' }
-    Faraday::ServerError.new('the server responded with status 503 - model is still loading', response)
+    server_error(
+      status: 503, body: '{"error": "Model not ready", "detail": "model is still loading"}',
+      message: 'the server responded with status 503 - model is still loading'
+    )
   end
 
   private
+
+  # A Faraday error in the shape the adapter actually produces: the response is
+  # a Faraday::Env (a Struct, NOT a Hash). The D8 regression was that the
+  # callable gated body detection on `error.response.is_a?(Hash)`, which is
+  # never true for a real Env — so these errors must not be plain-Hash fakes.
+  def server_error(status:, body:, message:)
+    env = Faraday::Env.new
+    env[:status] = status
+    env[:headers] = {}
+    env[:body] = body
+    Faraday::ServerError.new(message, env)
+  end
 
   def apply_vllm_escalation(outcome:, error:)
     if outcome.kind == :overloaded && model_not_ready_signal?(error: error)
@@ -268,33 +177,31 @@ class VllmSsotHarness
 
     outcome
   end
-
-  def build_single_offering(model_id:, tier:, now:)
-    Legion::Extensions::Llm::Inventory::OfferingDraft.new(
-      provider_native_key: model_id, model: model_id, tier: tier,
-      operation_evidence: build_operation_evidence(now: now, embed_supported: false),
-      capability_evidence: build_capability_evidence,
-      context_evidence: Legion::Extensions::Llm::Inventory::ValueEvidence.new(
-        status: :known, value: 131_072, source: :provider_catalog
-      ),
-      max_output_evidence: Legion::Extensions::Llm::Inventory::ValueEvidence.new(status: :unknown, source: :absent),
-      embedding_dimensions_evidence: Legion::Extensions::Llm::Inventory::ValueEvidence.new(
-        status: :unknown, source: :absent
-      ),
-      model_revision_evidence: Legion::Extensions::Llm::Inventory::ValueEvidence.new(
-        status: :unknown, source: :absent
-      ),
-      tokenizer_evidence: Legion::Extensions::Llm::Inventory::ValueEvidence.new(status: :unknown, source: :absent),
-      quota_domains: {}, metadata: { raw_model: model_id }, publication_source: :provider_catalog
-    )
-  end
 end
 
 RSpec.describe Legion::Extensions::Llm::Vllm do
   let(:ssot_harness) { VllmSsotHarness.new }
   let(:registry) { Legion::Extensions::Llm::Inventory::Registry }
 
-  before { registry.reset! }
+  before do
+    registry.reset!
+    # Offline: stub the Faraday connection boundary so the production
+    # callable's dispatch (VllmCallable -> Vllm::Provider -> Connection#post)
+    # reaches a canned response without a real HTTP round-trip. The exact-fleet
+    # example asserts the captured callable is the one invoked.
+    allow_any_instance_of(Legion::Extensions::Llm::Connection)
+      .to receive(:post).and_return(completion_response)
+  end
+
+  def completion_response
+    @completion_response ||= Struct.new(:body).new(
+      {
+        'choices' => [{ 'message' => { 'role' => 'assistant', 'content' => 'conformance' } }],
+        'model' => 'meta-llama/Llama-3.1-8B-Instruct',
+        'usage' => { 'prompt_tokens' => 1, 'completion_tokens' => 1 }
+      }
+    )
+  end
 
   it_behaves_like 'an SSOT v3 provider adapter'
 
@@ -831,6 +738,67 @@ RSpec.describe Legion::Extensions::Llm::Vllm do
     end
   end
 
+  # ─── D17: production raises Llm::*Error (via the Connection ErrorMiddleware),
+  #     not raw Faraday classes. The offline-body signal must be read off the
+  #     Llm error's WRAPPED Faraday::Response, and the request-local Llm classes
+  #     must keep their outcomes. ──────────────────────────────────────────────
+
+  describe 'production Llm error shape (D17)' do
+    let(:callable) { ssot_harness.build_callable(instance_config: ssot_harness.instance_configs[0]) }
+
+    def llm_error(klass, status:, body:, message:)
+      env = Faraday::Env.new
+      env[:status] = status
+      env[:headers] = {}
+      env[:body] = body
+      klass.new(Faraday::Response.new(env), message)
+    end
+
+    it 'classifies a ServiceUnavailableError with an offline body as instance_unavailable' do
+      error = llm_error(
+        Legion::Extensions::Llm::ServiceUnavailableError,
+        status: 503, body: '{"error": "Instance not available", "detail": "server is going offline"}',
+        message: '503 Service Unavailable'
+      )
+      expect(callable.normalize_dispatch_error(error: error).kind).to eq(:instance_unavailable)
+    end
+
+    it 'classifies a ServiceUnavailableError without an offline body as provider_error' do
+      error = llm_error(
+        Legion::Extensions::Llm::ServiceUnavailableError,
+        status: 503, body: '{"error": "Server overloaded"}', message: '503 Service Unavailable'
+      )
+      expect(callable.normalize_dispatch_error(error: error).kind).to eq(:provider_error)
+    end
+
+    it 'keeps the request-local Llm outcomes (not :provider_error)' do
+      expect(callable.normalize_dispatch_error(
+        error: Legion::Extensions::Llm::OverloadedError.new('529')
+      ).kind).to eq(:overloaded)
+      expect(callable.normalize_dispatch_error(
+        error: Legion::Extensions::Llm::RateLimitError.new('429')
+      ).kind).to eq(:rate_limited)
+      expect(callable.normalize_dispatch_error(
+        error: Legion::Extensions::Llm::UnauthorizedError.new('401')
+      ).kind).to eq(:authentication)
+      expect(callable.normalize_dispatch_error(
+        error: Legion::Extensions::Llm::ModelNotFoundError.new('404')
+      ).kind).to eq(:model_missing)
+      expect(callable.normalize_dispatch_error(
+        error: Legion::Extensions::Llm::PaymentRequiredError.new('402')
+      ).kind).to eq(:billing)
+    end
+
+    it 'maps raw connection/timeout errors (Llm middleware passthrough) correctly' do
+      expect(callable.normalize_dispatch_error(
+        error: Errno::ECONNREFUSED.new('connection refused')
+      ).kind).to eq(:connection_failure)
+      expect(callable.normalize_dispatch_error(
+        error: Timeout::Error.new('read timeout')
+      ).kind).to eq(:timeout)
+    end
+  end
+
   # ─── No quota domain broadening without authoritative scope ─────────────────
 
   describe 'quota domain safety' do
@@ -1037,17 +1005,20 @@ RSpec.describe Legion::Extensions::Llm::Vllm do
     end
 
     it 'offering drafts require an explicit model string' do
+      # Reuse the production builder's evidence (D16 — no duplicated builder);
+      # only the model is forced empty to exercise the draft validation.
+      valid = ssot_harness.build_offering_drafts(tier: :local).first
       expect do
         Legion::Extensions::Llm::Inventory::OfferingDraft.new(
           provider_native_key: 'test',
           model: '',
           tier: :local,
-          operation_evidence: ssot_harness.send(:build_operation_evidence, now: Time.now, embed_supported: false),
-          context_evidence: Legion::Extensions::Llm::Inventory::ValueEvidence.new(status: :unknown, source: :absent),
-          max_output_evidence: Legion::Extensions::Llm::Inventory::ValueEvidence.new(status: :unknown, source: :absent),
-          embedding_dimensions_evidence: Legion::Extensions::Llm::Inventory::ValueEvidence.new(status: :unknown, source: :absent),
-          model_revision_evidence: Legion::Extensions::Llm::Inventory::ValueEvidence.new(status: :unknown, source: :absent),
-          tokenizer_evidence: Legion::Extensions::Llm::Inventory::ValueEvidence.new(status: :unknown, source: :absent),
+          operation_evidence: valid.operation_evidence,
+          context_evidence: valid.context_evidence,
+          max_output_evidence: valid.max_output_evidence,
+          embedding_dimensions_evidence: valid.embedding_dimensions_evidence,
+          model_revision_evidence: valid.model_revision_evidence,
+          tokenizer_evidence: valid.tokenizer_evidence,
           quota_domains: {},
           metadata: {},
           publication_source: :provider_catalog
@@ -1058,7 +1029,7 @@ RSpec.describe Legion::Extensions::Llm::Vllm do
 
   # ─── VllmCallable direct contract ──────────────────────────────────────────
 
-  describe Legion::Extensions::Llm::Vllm::Actor::VllmCallable do
+  describe Legion::Extensions::Llm::Vllm::VllmCallable do
     let(:callable) do
       described_class.new(
         instance_cfg: ssot_harness.instance_configs[0],
@@ -1069,6 +1040,12 @@ RSpec.describe Legion::Extensions::Llm::Vllm do
     it 'responds to disconnect' do
       expect(callable).to respond_to(:disconnect)
       expect(callable).to respond_to(:disconnected?)
+    end
+
+    it 'implements the fleet dispatch operations the coordinator invokes' do
+      %i[chat stream_chat embed count_tokens].each do |op|
+        expect(callable).to respond_to(op), "production VllmCallable must implement ##{op}"
+      end
     end
 
     it 'responds to normalize_dispatch_error with kwargs' do

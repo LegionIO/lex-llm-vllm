@@ -48,22 +48,21 @@ module Legion
 
         def self.discover_instances
           instances = {}
-
-          if CredentialSources.http_ok?('http://localhost:8000', path: '/health', timeout: 0.1)
-            instances[:local] = {
-              vllm_api_base: 'http://localhost:8000',
-              tier: :local,
-              capabilities: [:completion]
-            }
-          end
-
-          configured = CredentialSources.setting(:extensions, :llm, :vllm, :instances)
+          configured = settings[:instances]
           if configured.is_a?(Hash)
             configured.each do |name, config|
-              instances[name.to_sym] = DEFAULT_INSTANCE_TIER.merge(normalize_instance_config(config))
+              # The synthetic instances.default template (always present from
+              # provider_settings) is not a real instance — claiming it would
+              # register and health-probe a phantom localhost target. Entries
+              # without a resolvable endpoint are equally unclaimable.
+              next if name.to_sym == :default
+
+              normalized = normalize_instance_config(config)
+              next if normalized[:vllm_api_base].to_s.strip.empty?
+
+              instances[name.to_sym] = DEFAULT_INSTANCE_TIER.merge(normalized)
             end
           end
-
           log.debug { "discovered #{instances.size} vLLM instance(s): #{instances.keys.join(', ')}" }
           instances
         end
@@ -99,7 +98,6 @@ module Legion
           return :direct if url.nil? || url.to_s.empty?
 
           require 'uri'
-          require_relative 'vllm/actors/discovery_refresh'
           host = URI.parse(url.to_s).host.to_s.downcase
           %w[localhost 127.0.0.1 ::1].include?(host) ? :local : :direct
         rescue URI::InvalidURIError => e
