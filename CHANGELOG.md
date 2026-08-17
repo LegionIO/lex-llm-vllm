@@ -1,5 +1,52 @@
 # Changelog
 
+## [0.4.4] - 2026-08-17
+
+### Fixed
+- **Multi-message requests carrying the prompt-cache `cache_control` key no longer fail before HTTP.** legion-llm's prompt-cache step injects `cache_control: {type: :ephemeral}` into every ≥2-message request; the canonical message bridge raised `ArgumentError: unknown keyword: :cache_control` in `Message.from_hash` before any HTTP was sent, so every multi-message vLLM request 500ed. The bridge now projects onto the known member set, so the transport-only key is dropped and never leaks onto the wire.
+- **Non-UTF-8 (ASCII-8BIT) dispatch error messages no longer mask the original error.** `RecordSupport.sanitized_reason` now coerces to valid UTF-8 instead of raising `ValidationError`, so a real provider error is no longer turned into an unclassifiable retriable 500.
+- **Adds dispatch-boundary regression specs** — 2-message `cache_control` sync render, canonical member projection, and the full provider render-to-parse path — proven to fail pre-fix.
+
+## [0.4.3] - 2026-08-16
+
+### Fixed
+- **Instance identity is now the operator's config NAME** — the discovery
+  runner previously keyed instances by the derived `host:port/ak:<digest>`
+  string. The derived id silently inerted the router's `instances.<name>`
+  settings lookups (per-instance tuning, weight, preferred context windows)
+  and collapsed distinct config names that share an endpoint. Discovery now
+  publishes `InstanceKey.instance_id` = the config name and carries the
+  derived `host:port/ak:<digest>` in the secondary `physical_id` field
+  (dedup/diagnostics only — it never participates in identity). Two config
+  names pointing at the same endpoint stay distinct instances; an endpoint or
+  API-key move under a stable name re-claims the instance so the captured
+  callable tracks the new endpoint. Zero config changes required.
+- **Embedding models now authoritatively exclude chat** — an embedding model
+  (`type: embedding` or `capabilities: [embedding]` in the vLLM catalog)
+  published `chat: :supported`, so a plain chat request could be misrouted to
+  an embedding-only instance. The offering builder now branches operation
+  evidence on model type (matching bedrock): embedding models publish
+  `chat`/`stream_chat`/`count_tokens` and the non-embedding media operations
+  as `:unsupported` and `embed` as `:supported`; chat models are unchanged
+  (`chat`/`stream_chat` `:supported`, `embed` `:unsupported`).
+- **`tools` capability evidence was permanently `:unknown`** — `resolve_bool_cap`
+  returned `:unknown` for every configuration (absent, `enable_tools: true`, or
+  `false`), so the router's candidate evaluator never saw a ready candidate for
+  any request requiring the `tools` capability and rejected every tool-using
+  request (e.g. Claude Code `/v1/messages`) with typed `too_early` (425/529)
+  indefinitely. vLLM serves tool calling as an engine capability for every chat
+  model and this provider's translator implements the full tool loop, so the
+  builder now publishes `tools: :supported` with `:provider_implementation`
+  source. An explicit `enable_tools: false` (model level, else instance level)
+  remains an operator opt-out expressed as `:unknown` with the matching
+  override source — override sources may never carry `:supported` under the
+  SSOT v3 tri-state evidence contract.
+- **`thinking` capability evidence semantics made explicit** — support is a
+  per-model chat-template fact the vLLM catalog does not expose, and a config
+  permission is not evidence, so it stays `:unknown` in every configuration
+  (override source when `enable_thinking` is set at model/instance level,
+  `:default_false` otherwise).
+
 ## [0.4.2] - 2026-08-13
 
 ### Fixed
