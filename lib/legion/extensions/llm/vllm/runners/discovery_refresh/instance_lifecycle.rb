@@ -24,20 +24,22 @@ module Legion
               # and refresh/probe every known instance. Vllm.discover_instances
               # already applies the D3 filtering (no synthetic :default, no
               # endpoint-less entries).
+              #
+              # Instance identity is the operator's CONFIG NAME (the key the
+              # router uses for instances.<name> settings lookups). The derived
+              # host:port/ak physical id is a secondary field only — two config
+              # names pointing at the same endpoint remain distinct instances.
               def reconcile_instances
                 configured = Vllm.discover_instances
-                by_id = configured.each_with_object({}) do |(name, instance_cfg), ids|
-                  ids[derive_instance_id(instance_cfg: instance_cfg)] = [name, instance_cfg]
-                end
 
                 instance_states.each_key do |instance_id|
-                  next if by_id.key?(instance_id)
+                  next if configured.key?(instance_id)
 
                   remove_instance_state(instance_id)
                 end
 
-                by_id.each do |instance_id, (name, instance_cfg)|
-                  update_instance(name: name, instance_id: instance_id, instance_cfg: instance_cfg)
+                configured.each do |name, instance_cfg|
+                  update_instance(name: name, instance_cfg: instance_cfg)
                 rescue StandardError => e
                   handle_exception(e, level: :warn, operation: 'vllm.runner.discovery.instance',
                                       instance_name: name.to_s)
@@ -49,12 +51,23 @@ module Legion
                 { success: true }
               end
 
-              def update_instance(name:, instance_id:, instance_cfg:)
-                if instance_states.key?(instance_id)
-                  refresh_instance(instance_id: instance_id, instance_cfg: instance_cfg)
+              def update_instance(name:, instance_cfg:)
+                state = instance_states[name]
+                if state && physical_id_changed?(state, instance_cfg)
+                  # The physical target moved (endpoint or API key changed) —
+                  # the captured callable points at the old endpoint, so drop
+                  # and re-claim under the same config-name identity.
+                  remove_instance_state(name)
+                  claim_and_activate_instance(name: name, instance_cfg: instance_cfg)
+                elsif state
+                  refresh_instance(instance_id: name, instance_cfg: instance_cfg)
                 else
-                  claim_and_activate_instance(name: name, instance_id: instance_id, instance_cfg: instance_cfg)
+                  claim_and_activate_instance(name: name, instance_cfg: instance_cfg)
                 end
+              end
+
+              def physical_id_changed?(state, instance_cfg)
+                state[:instance_key].physical_id != derive_physical_id(instance_cfg: instance_cfg)
               end
 
               def remove_instance_state(instance_id)

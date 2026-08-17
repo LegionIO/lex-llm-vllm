@@ -81,9 +81,13 @@ module Legion
                 )
               end
 
-              # ── Instance identity ──────────────────────────────────────────
+              # ── Instance physical identity (secondary) ─────────────────────
 
-              def derive_instance_id(instance_cfg:)
+              # The derived host:port(/ak:<digest>) string is the SECONDARY
+              # physical identity — dedup/diagnostics only. The instance
+              # identity is the operator's config name (InstanceKey.instance_id);
+              # two config names sharing an endpoint stay distinct instances.
+              def derive_physical_id(instance_cfg:)
                 base_url = instance_cfg[:vllm_api_base] || instance_cfg[:endpoint]
                 host_port = extract_host_port(url: normalize_api_base(base_url))
                 api_key = instance_cfg[:vllm_api_key]

@@ -58,16 +58,18 @@ RSpec.describe Legion::Extensions::Llm::Vllm::Runners::DiscoveryRefresh do
     )
   end
 
+  # Identity is the operator's config NAME; the derived host:port(/ak:<digest>)
+  # is the secondary physical_id (dedup/diagnostics, never identity).
   def key(instance_id)
     Legion::Extensions::Llm::Inventory::Identity::InstanceKey.new(provider_family: :vllm, instance_id: instance_id)
   end
 
-  def apollo_id
-    runner.derive_instance_id(instance_cfg: { vllm_api_base: 'http://apollo:8000' })
+  def apollo_physical_id
+    runner.derive_physical_id(instance_cfg: { vllm_api_base: 'http://apollo:8000' })
   end
 
-  def helios_id
-    runner.derive_instance_id(instance_cfg: { vllm_api_base: 'http://helios:8001', vllm_api_key: 'sk-helios' })
+  def helios_physical_id
+    runner.derive_physical_id(instance_cfg: { vllm_api_base: 'http://helios:8001', vllm_api_key: 'sk-helios' })
   end
 
   def settings_tree
@@ -100,17 +102,28 @@ RSpec.describe Legion::Extensions::Llm::Vllm::Runners::DiscoveryRefresh do
     it 'claims and activates every real configured instance on the first tick' do
       runner.refresh
 
-      expect(registry.snapshot.instance(instance_key: key(apollo_id)).availability.state).to eq(:available)
-      expect(registry.snapshot.publication_status(instance_key: key(apollo_id)).state).to eq(:complete)
-      expect(registry.snapshot.instance(instance_key: key(helios_id)).availability.state).to eq(:available)
+      expect(registry.snapshot.instance(instance_key: key(:apollo)).availability.state).to eq(:available)
+      expect(registry.snapshot.publication_status(instance_key: key(:apollo)).state).to eq(:complete)
+      expect(registry.snapshot.instance(instance_key: key(:helios)).availability.state).to eq(:available)
     end
 
     it 'does NOT claim the synthetic :default template (D3 — no phantom localhost)' do
       runner.refresh
 
-      default_id = runner.derive_instance_id(instance_cfg: { vllm_api_base: 'http://localhost:8000' })
-      expect(registry.snapshot.publication_status(instance_key: key(default_id))).to be_nil
-      expect(registry.snapshot.instance(instance_key: key(default_id))).to be_nil
+      claimed = registry.snapshot.each_instance.map { |record| record.instance_key.instance_id }.sort
+      expect(claimed).to eq(%w[apollo helios])
+    end
+
+    it 'publishes the config NAME as instance_id and the derived endpoint as the secondary physical_id' do
+      runner.refresh
+
+      apollo = registry.snapshot.instance(instance_key: key(:apollo))
+      expect(apollo.instance_key.instance_id).to eq('apollo')
+      expect(apollo.instance_key.physical_id).to eq(apollo_physical_id)
+
+      helios = registry.snapshot.instance(instance_key: key(:helios))
+      expect(helios.instance_key.instance_id).to eq('helios')
+      expect(helios.instance_key.physical_id).to eq(helios_physical_id)
     end
 
     it 'writes the display health hash to settings after the commit (D14)' do
@@ -149,15 +162,15 @@ RSpec.describe Legion::Extensions::Llm::Vllm::Runners::DiscoveryRefresh do
 
     it 'stays :initializing while the instance is down, then re-activates when it recovers' do
       runner.refresh # tick 1: claim, readiness fails -> :initializing
-      expect(registry.snapshot.publication_status(instance_key: key(apollo_id)).state).to eq(:initializing)
-      expect(registry.snapshot.instance(instance_key: key(apollo_id))).to be_nil
+      expect(registry.snapshot.publication_status(instance_key: key(:apollo)).state).to eq(:initializing)
+      expect(registry.snapshot.instance(instance_key: key(:apollo))).to be_nil
 
       runner.refresh # tick 2: still down -> stays :initializing
-      expect(registry.snapshot.publication_status(instance_key: key(apollo_id)).state).to eq(:initializing)
+      expect(registry.snapshot.publication_status(instance_key: key(:apollo)).state).to eq(:initializing)
 
       runner.refresh # tick 3: recovered -> re-activated via activate_instance_snapshot
-      expect(registry.snapshot.instance(instance_key: key(apollo_id)).availability.state).to eq(:available)
-      expect(registry.snapshot.publication_status(instance_key: key(apollo_id)).state).to eq(:complete)
+      expect(registry.snapshot.instance(instance_key: key(:apollo)).availability.state).to eq(:available)
+      expect(registry.snapshot.publication_status(instance_key: key(:apollo)).state).to eq(:complete)
     end
   end
 
@@ -176,7 +189,7 @@ RSpec.describe Legion::Extensions::Llm::Vllm::Runners::DiscoveryRefresh do
   describe 'D4 tick reconcile (late-removed instance)' do
     it 'removes an instance that vanished from settings on a later tick' do
       runner.refresh
-      expect(registry.snapshot.instance(instance_key: key(helios_id))).not_to be_nil
+      expect(registry.snapshot.instance(instance_key: key(:helios))).not_to be_nil
 
       # Helios is removed from the configured catalog.
       configure_vllm_settings({ apollo: raw_instances[:apollo] })
@@ -184,8 +197,8 @@ RSpec.describe Legion::Extensions::Llm::Vllm::Runners::DiscoveryRefresh do
 
       runner.refresh
 
-      expect(registry.snapshot.instance(instance_key: key(helios_id))).to be_nil
-      expect(registry.snapshot.instance(instance_key: key(apollo_id)).availability.state).to eq(:available)
+      expect(registry.snapshot.instance(instance_key: key(:helios))).to be_nil
+      expect(registry.snapshot.instance(instance_key: key(:apollo)).availability.state).to eq(:available)
       # D14: the removed instance's display health is cleared.
       expect(settings_tree.dig(:instances, :helios, :health)).to be_nil
     end
@@ -197,12 +210,63 @@ RSpec.describe Legion::Extensions::Llm::Vllm::Runners::DiscoveryRefresh do
 
     it 'marks an instance unavailable when a cadence probe fails' do
       runner.refresh # tick 1: activate
-      expect(registry.snapshot.instance(instance_key: key(apollo_id)).availability.state).to eq(:available)
+      expect(registry.snapshot.instance(instance_key: key(:apollo)).availability.state).to eq(:available)
 
       runner.refresh # tick 2: cadence probe now fails -> unavailable
 
-      expect(registry.snapshot.instance(instance_key: key(apollo_id)).availability.state).to eq(:unavailable)
+      expect(registry.snapshot.instance(instance_key: key(:apollo)).availability.state).to eq(:unavailable)
       expect(settings_tree.dig(:instances, :apollo, :health)).to include(circuit_state: :open, available: false, adjustment: -50)
+    end
+  end
+
+  describe 'endpoint move under a stable config name' do
+    let(:raw_instances) { { apollo: { vllm_api_base: 'http://apollo:8000', tier: :local } } }
+    let(:health_results) { [ready_result, ready_result] }
+
+    it 're-claims the instance when its physical endpoint changes between ticks' do
+      runner.refresh
+      expect(registry.snapshot.instance(instance_key: key(:apollo)).instance_key.physical_id)
+        .to eq(apollo_physical_id)
+
+      # The operator moves the endpoint; the config name (identity) is unchanged.
+      configure_vllm_settings({ apollo: { vllm_api_base: 'http://apollo:8001', tier: :local } })
+      allow(Legion::Extensions::Llm::Vllm).to receive(:settings).and_return(settings_tree)
+
+      runner.refresh
+
+      apollo = registry.snapshot.instance(instance_key: key(:apollo))
+      expect(apollo.instance_key.instance_id).to eq('apollo')
+      expect(apollo.instance_key.physical_id).to eq('apollo:8001')
+      expect(apollo.availability.state).to eq(:available)
+    end
+  end
+
+  # Identity is the config name, so two config names sharing one endpoint stay
+  # distinct instances — the physical id is dedup/diagnostics, never identity.
+  describe 'two config names sharing one endpoint' do
+    let(:raw_instances) do
+      {
+        apollo: { vllm_api_base: 'http://apollo:8000', tier: :local },
+        apollo_embed: { vllm_api_base: 'http://apollo:8000', tier: :local }
+      }
+    end
+
+    it 'claims both config names as distinct instances' do
+      runner.refresh
+
+      claimed = registry.snapshot.each_instance.map { |record| record.instance_key.instance_id }.sort
+      expect(claimed).to eq(%w[apollo apollo_embed])
+      expect(registry.snapshot.instance(instance_key: key(:apollo)).availability.state).to eq(:available)
+      expect(registry.snapshot.instance(instance_key: key(:apollo_embed)).availability.state).to eq(:available)
+    end
+
+    it 'derives the same physical_id for both but keeps them independently available' do
+      runner.refresh
+
+      apollo = registry.snapshot.instance(instance_key: key(:apollo))
+      apollo_embed = registry.snapshot.instance(instance_key: key(:apollo_embed))
+      expect(apollo.instance_key.physical_id).to eq(apollo_embed.instance_key.physical_id)
+      expect(apollo.instance_key).not_to eq(apollo_embed.instance_key)
     end
   end
 
@@ -214,8 +278,8 @@ RSpec.describe Legion::Extensions::Llm::Vllm::Runners::DiscoveryRefresh do
       runner.remove_all_instances
 
       expect(runner.instance_states.size).to eq(0)
-      expect(registry.snapshot.instance(instance_key: key(apollo_id))).to be_nil
-      expect(registry.snapshot.instance(instance_key: key(helios_id))).to be_nil
+      expect(registry.snapshot.instance(instance_key: key(:apollo))).to be_nil
+      expect(registry.snapshot.instance(instance_key: key(:helios))).to be_nil
       expect(settings_tree.dig(:instances, :apollo, :health)).to be_nil
       expect(settings_tree.dig(:instances, :apollo, :capabilities)).to be_nil
     end
@@ -231,14 +295,14 @@ RSpec.describe Legion::Extensions::Llm::Vllm::Runners::DiscoveryRefresh do
       allow_any_instance_of(Legion::Extensions::Llm::Vllm::Helpers::OfferingBuilder)
         .to receive(:build).and_raise(NameError, 'uninitialized constant Foo')
 
-      expect { runner.fetch_offerings(instance_cfg: cfg, instance_key: key(apollo_id)) }
+      expect { runner.fetch_offerings(instance_cfg: cfg, instance_key: key(:apollo)) }
         .to raise_error(NameError)
     end
 
     it 'still yields an empty set for a network error (Faraday)' do
       allow(runner).to receive(:fetch_models).and_raise(Faraday::ConnectionFailed, 'connection refused')
 
-      expect(runner.fetch_offerings(instance_cfg: cfg, instance_key: key(apollo_id))).to eq([])
+      expect(runner.fetch_offerings(instance_cfg: cfg, instance_key: key(:apollo))).to eq([])
     end
   end
 

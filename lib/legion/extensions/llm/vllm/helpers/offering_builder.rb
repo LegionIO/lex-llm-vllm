@@ -54,25 +54,55 @@ module Legion
               meta
             end
 
+            # Operation evidence is branched on the model's operation type so
+            # the evidence is AUTHORITATIVE about what the instance can serve:
+            # an embedding model publishes chat: :unsupported (matching bedrock)
+            # so a plain chat request can never be misrouted to an
+            # embedding-only instance, and a chat model publishes embed:
+            # :unsupported.
             def build_operation_evidence(embed_supported:)
+              return embedding_operation_evidence if embed_supported
+
+              chat_operation_evidence
+            end
+
+            def embedding_operation_evidence
               now = Time.now.freeze
-              src = ->(status) { status == :unknown ? :default_false : :provider_implementation }
-              op = lambda do |operation:, status:|
-                Legion::Extensions::Llm::Inventory::OperationEvidence.new(
-                  operation: operation, status: status, source: src.call(status), observed_at: now
-                )
-              end
+              op = ->(operation, status) { operation_evidence(operation: operation, status: status, now: now) }
               {
-                chat: op.call(operation: :chat, status: :supported),
-                stream_chat: op.call(operation: :stream_chat, status: :supported),
-                embed: op.call(operation: :embed, status: embed_supported ? :supported : :unsupported),
-                image: op.call(operation: :image, status: :unsupported),
-                transcribe: op.call(operation: :transcribe, status: :unsupported),
-                translate: op.call(operation: :translate, status: :unsupported),
-                speak: op.call(operation: :speak, status: :unsupported),
-                moderate: op.call(operation: :moderate, status: :unsupported),
-                count_tokens: op.call(operation: :count_tokens, status: :unknown)
+                chat: op.call(:chat, :unsupported),
+                stream_chat: op.call(:stream_chat, :unsupported),
+                embed: op.call(:embed, :supported),
+                image: op.call(:image, :unsupported),
+                transcribe: op.call(:transcribe, :unsupported),
+                translate: op.call(:translate, :unsupported),
+                speak: op.call(:speak, :unsupported),
+                moderate: op.call(:moderate, :unsupported),
+                count_tokens: op.call(:count_tokens, :unsupported)
               }
+            end
+
+            def chat_operation_evidence
+              now = Time.now.freeze
+              op = ->(operation, status) { operation_evidence(operation: operation, status: status, now: now) }
+              {
+                chat: op.call(:chat, :supported),
+                stream_chat: op.call(:stream_chat, :supported),
+                embed: op.call(:embed, :unsupported),
+                image: op.call(:image, :unsupported),
+                transcribe: op.call(:transcribe, :unsupported),
+                translate: op.call(:translate, :unsupported),
+                speak: op.call(:speak, :unsupported),
+                moderate: op.call(:moderate, :unsupported),
+                count_tokens: op.call(:count_tokens, :unknown)
+              }
+            end
+
+            def operation_evidence(operation:, status:, now:)
+              Legion::Extensions::Llm::Inventory::OperationEvidence.new(
+                operation: operation, status: status,
+                source: status == :unknown ? :default_false : :provider_implementation, observed_at: now
+              )
             end
 
             def build_capability_evidence(model_id:, embed_supported:)
@@ -85,8 +115,8 @@ module Legion
               result = {
                 completion: cap.call(capability: :completion, status: :supported, source: :provider_implementation),
                 streaming: cap.call(capability: :streaming, status: :supported, source: :provider_implementation),
-                thinking: resolve_bool_cap(cap, :thinking, :enable_thinking, model_id),
-                tools: resolve_bool_cap(cap, :tools, :enable_tools, model_id)
+                tools: tools_capability_evidence(cap, model_id),
+                thinking: thinking_capability_evidence(cap, model_id)
               }
               result[:vision] = cap.call(
                 capability: :vision,
@@ -101,16 +131,44 @@ module Legion
               result
             end
 
-            def resolve_bool_cap(cap, capability_name, config_key, model_id)
-              model_cfg = instance_cfg.dig(:models, model_id.to_sym)
-              if model_cfg.is_a?(Hash) && model_cfg.key?(config_key)
-                return cap.call(capability: capability_name, status: :unknown, source: :model_override)
-              end
-              if instance_cfg.key?(config_key)
-                return cap.call(capability: capability_name, status: :unknown, source: :instance_override)
+            # Tool calling is a vLLM engine capability for every chat model it
+            # serves, and this provider's translator implements the full tool
+            # loop (including interleaved parallel tool calls), so support is a
+            # provider-implementation fact, not a config permission. An
+            # explicit `enable_tools: false` is an operator opt-out, which the
+            # evidence contract can only express as unknown (override sources
+            # may never carry :supported) — that keeps tool requests off the
+            # instance without a false authoritative unsupported.
+            def tools_capability_evidence(cap, model_id)
+              entry = explicit_config_entry(:enable_tools, model_id)
+              if entry && entry[:value] == false
+                return cap.call(capability: :tools, status: :unknown, source: entry[:source])
               end
 
-              cap.call(capability: capability_name, status: :unknown, source: :default_false)
+              cap.call(capability: :tools, status: :supported, source: :provider_implementation)
+            end
+
+            # Thinking support is a per-model chat-template fact that the vLLM
+            # model catalog does not expose, and a config permission is not
+            # evidence (SSOT v3 tri-state contract), so it stays unknown in
+            # every configuration.
+            def thinking_capability_evidence(cap, model_id)
+              entry = explicit_config_entry(:enable_thinking, model_id)
+              source = entry ? entry[:source] : :default_false
+              cap.call(capability: :thinking, status: :unknown, source: source)
+            end
+
+            # Explicit gate value from the per-model config, falling back to
+            # the instance-level config. Returns { value:, source: } when
+            # either level sets the key (model level wins), else nil.
+            def explicit_config_entry(config_key, model_id)
+              model_cfg = instance_cfg.dig(:models, model_id.to_sym)
+              if model_cfg.is_a?(Hash) && model_cfg.key?(config_key)
+                return { value: model_cfg[config_key], source: :model_override }
+              end
+              return { value: instance_cfg[config_key], source: :instance_override } if instance_cfg.key?(config_key)
+
+              nil
             end
 
             def build_value_evidence(value)

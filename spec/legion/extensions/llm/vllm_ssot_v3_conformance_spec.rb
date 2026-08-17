@@ -76,10 +76,12 @@ class VllmSsotHarness
 
   INSTANCE_CONFIGS = [
     {
+      name: 'gpu-server-1',
       vllm_api_base: 'http://gpu-server-1.internal:8000',
       tier: :local, vllm_api_key: nil, usage: { inference: true, embedding: false }
     }.freeze,
     {
+      name: 'gpu-server-2',
       vllm_api_base: 'http://gpu-server-2.internal:8001',
       tier: :local, vllm_api_key: 'sk-test-key-alpha', usage: { inference: true, embedding: false }
     }.freeze
@@ -88,9 +90,17 @@ class VllmSsotHarness
   def provider_family = :vllm
   def instance_configs = INSTANCE_CONFIGS
 
+  # Identity is the operator's CONFIG NAME — the key the router uses for
+  # instances.<name> settings lookups.
   def instance_id(instance_config:)
+    instance_config[:name].to_s
+  end
+
+  # The derived host:port(/ak:<digest>) string is the SECONDARY physical id
+  # (dedup/diagnostics only) — it never participates in instance identity.
+  def physical_id(instance_config:)
     base_url = instance_config[:vllm_api_base] || instance_config[:endpoint] || 'http://localhost:8000'
-    host_port = extract_host_port(base_url: base_url)
+    host_port = extract_host_port(base_url: base_url.sub(%r{/v1/?\z}, ''))
     api_key = instance_config[:vllm_api_key] || instance_config.dig(:credentials, :api_key)
 
     return host_port unless api_key.is_a?(String) && !api_key.strip.empty?
@@ -109,15 +119,31 @@ class VllmSsotHarness
   # tier; the instance_key is derived from the passed instance_config.
   def build_offering_drafts(tier: :local, instance_config: nil, **)
     cfg_source = instance_config || instance_configs.first
-    cfg = cfg_source.merge(tier: tier)
-    instance_key = Legion::Extensions::Llm::Inventory::Identity::InstanceKey.new(
-      provider_family: provider_family, instance_id: instance_id(instance_config: cfg_source)
-    )
-    builder = Legion::Extensions::Llm::Vllm::Helpers::OfferingBuilder.new(
-      instance_cfg: cfg, instance_key: instance_key
-    )
+    cfg_source.merge(tier: tier)
+    builder = offering_builder(tier: tier, instance_config: cfg_source)
     model_id = 'meta-llama/Llama-3.1-8B-Instruct'
     [builder.build(model_id: model_id, model_data: { id: model_id, max_model_len: 131_072 })]
+  end
+
+  # Embedding-model variant of the draft builder: the production
+  # OfferingBuilder decides operation evidence from the catalog `type`, so this
+  # is the conformance path for the authoritative chat-exclusion check.
+  def build_embedding_offering_drafts(instance_config:, tier: :local)
+    builder = offering_builder(tier: tier, instance_config: instance_config)
+    model_id = 'BAAI/bge-large-en-v1.5'
+    [builder.build(model_id: model_id, model_data: { id: model_id, type: 'embedding', max_model_len: 512 })]
+  end
+
+  def offering_builder(tier:, instance_config:)
+    cfg = instance_config.merge(tier: tier)
+    instance_key = Legion::Extensions::Llm::Inventory::Identity::InstanceKey.new(
+      provider_family: provider_family,
+      instance_id: instance_id(instance_config: instance_config),
+      physical_id: physical_id(instance_config: instance_config)
+    )
+    Legion::Extensions::Llm::Vllm::Helpers::OfferingBuilder.new(
+      instance_cfg: cfg, instance_key: instance_key
+    )
   end
 
   def safe_readiness(instance_config:, **)
@@ -205,22 +231,31 @@ RSpec.describe Legion::Extensions::Llm::Vllm do
 
   it_behaves_like 'an SSOT v3 provider adapter'
 
-  # ─── vLLM-specific identity derivation ──────────────────────────────────────
+  # ─── vLLM-specific identity: config name + secondary physical id ───────────
 
-  describe 'instance identity derivation' do
-    it 'derives instance_id as host:port without API key' do
-      config = { vllm_api_base: 'http://gpu-server-1.internal:8000' }
-      expect(ssot_harness.instance_id(instance_config: config)).to eq('gpu-server-1.internal:8000')
+  describe 'instance identity (config name) + secondary physical id' do
+    it 'uses the operator config name as instance_id' do
+      config = ssot_harness.instance_configs.first
+      expect(ssot_harness.instance_id(instance_config: config)).to eq('gpu-server-1')
     end
 
-    it 'derives instance_id as host:port/ak:fingerprint with API key' do
-      config = { vllm_api_base: 'http://gpu-server-2.internal:8001', vllm_api_key: 'sk-test-key-alpha' }
+    it 'derives the secondary physical_id as host:port without API key' do
+      config = { name: 'gpu-server-1', vllm_api_base: 'http://gpu-server-1.internal:8000' }
+      expect(ssot_harness.physical_id(instance_config: config)).to eq('gpu-server-1.internal:8000')
+    end
+
+    it 'derives the secondary physical_id as host:port/ak:fingerprint with API key' do
+      config = { name: 'gpu-server-2', vllm_api_base: 'http://gpu-server-2.internal:8001', vllm_api_key: 'sk-test-key-alpha' }
       fingerprint = Digest::SHA256.hexdigest('sk-test-key-alpha')[0, 6]
-      expect(ssot_harness.instance_id(instance_config: config)).to eq("gpu-server-2.internal:8001/ak:#{fingerprint}")
+      expect(ssot_harness.physical_id(instance_config: config)).to eq("gpu-server-2.internal:8001/ak:#{fingerprint}")
     end
 
-    it 'produces distinct instance IDs for two different endpoints' do
-      ids = ssot_harness.instance_configs.map { |cfg| ssot_harness.instance_id(instance_config: cfg) }
+    it 'keeps two config names distinct even on the same endpoint' do
+      config = ssot_harness.instance_configs.first
+      ids = [
+        ssot_harness.instance_id(instance_config: config),
+        ssot_harness.instance_id(instance_config: config.merge(name: 'other-name'))
+      ]
       expect(ids.uniq.size).to eq(2)
     end
 
@@ -231,12 +266,28 @@ RSpec.describe Legion::Extensions::Llm::Vllm do
       expect(id_a).to eq(id_b)
     end
 
-    it 'strips /v1 suffix from endpoint when computing identity' do
-      config_with_v1 = { vllm_api_base: 'http://gpu-server-1.internal:8000/v1' }
-      config_without = { vllm_api_base: 'http://gpu-server-1.internal:8000' }
-      # Both should produce same host:port identity
-      expect(URI.parse(config_with_v1[:vllm_api_base]).host).to eq(URI.parse(config_without[:vllm_api_base]).host)
-      expect(URI.parse(config_with_v1[:vllm_api_base]).port).to eq(URI.parse(config_without[:vllm_api_base]).port)
+    it 'strips the /v1 suffix when deriving the physical id' do
+      with_v1 = { name: 'gpu-server-1', vllm_api_base: 'http://gpu-server-1.internal:8000/v1' }
+      without = { name: 'gpu-server-1', vllm_api_base: 'http://gpu-server-1.internal:8000' }
+      expect(ssot_harness.physical_id(instance_config: with_v1))
+        .to eq(ssot_harness.physical_id(instance_config: without))
+    end
+
+    it 'builds an InstanceKey whose physical_id is secondary to the name identity' do
+      config = ssot_harness.instance_configs.last
+      key = Legion::Extensions::Llm::Inventory::Identity::InstanceKey.new(
+        provider_family: :vllm,
+        instance_id: ssot_harness.instance_id(instance_config: config),
+        physical_id: ssot_harness.physical_id(instance_config: config)
+      )
+      expect(key.instance_id).to eq('gpu-server-2')
+      expect(key.physical_id).to be_a(String)
+
+      same_name = Legion::Extensions::Llm::Inventory::Identity::InstanceKey.new(
+        provider_family: :vllm, instance_id: 'gpu-server-2'
+      )
+      expect(key).to eq(same_name)
+      expect(key.hash).to eq(same_name.hash)
     end
   end
 
@@ -419,6 +470,35 @@ RSpec.describe Legion::Extensions::Llm::Vllm do
 
     it 'uses :default_false source for unknown operations' do
       expect(offering.operation_evidence[:count_tokens].source).to eq(:default_false)
+    end
+  end
+
+  # ─── Embedding models authoritatively exclude chat (bedrock parity) ────────
+
+  describe 'embedding model operation evidence' do
+    let(:offering) do
+      Time.now.freeze
+      ssot_harness.build_embedding_offering_drafts(instance_config: ssot_harness.instance_configs[0]).first
+    end
+
+    it 'marks chat as :unsupported so a plain chat request cannot misroute here' do
+      expect(offering.operation_evidence[:chat].status).to eq(:unsupported)
+      expect(offering.operation_evidence[:chat].source).to eq(:provider_implementation)
+    end
+
+    it 'marks stream_chat as :unsupported' do
+      expect(offering.operation_evidence[:stream_chat].status).to eq(:unsupported)
+    end
+
+    it 'marks embed as :supported' do
+      expect(offering.operation_evidence[:embed].status).to eq(:supported)
+    end
+
+    it 'marks the remaining operations as :unsupported' do
+      %i[image transcribe translate speak moderate count_tokens].each do |op|
+        expect(offering.operation_evidence[op].status).to eq(:unsupported),
+                                                          "expected #{op} to be :unsupported"
+      end
     end
   end
 
@@ -796,6 +876,127 @@ RSpec.describe Legion::Extensions::Llm::Vllm do
       expect(callable.normalize_dispatch_error(
         error: Timeout::Error.new('read timeout')
       ).kind).to eq(:timeout)
+    end
+  end
+
+  # ─── Dispatch boundary regression guards (live repro) ───────────────────────
+  # (B) legion-llm's prompt-cache step merges cache_control: { type: 'ephemeral' }
+  #     onto the last stable message hash of every >=2-message request. The
+  #     pre-fix Canonical::Message.from_hash did build(**h) with the whole hash,
+  #     so every multi-message vLLM request raised ArgumentError
+  #     'unknown keyword: :cache_control' before HTTP. from_hash now projects
+  #     onto the known member set.
+  # (A) A non-UTF-8 (ASCII-8BIT) dispatch error message — a raw provider body or
+  #     a Ruby kernel error — used to make RecordSupport.sanitized_reason raise
+  #     ValidationError 'is not valid UTF-8', masking the real provider error as
+  #     an unclassifiable retriable 500. It now coerces to valid UTF-8.
+
+  describe 'dispatch boundary: prompt-cache cache_control + non-UTF-8 errors' do
+    let(:config) { ssot_harness.instance_configs[0] }
+    let(:model_id) { 'meta-llama/Llama-3.1-8B-Instruct' }
+    let(:provider) { Legion::Extensions::Llm::Vllm::Provider.new(config) }
+    let(:callable) { ssot_harness.build_callable(instance_config: config) }
+
+    # The exact shape legion-llm's prompt-cache step produces
+    # (inference/steps/prompt_cache.rb#apply_conversation_breakpoint): a message
+    # hash that gained cache_control: { type: 'ephemeral' }.
+    let(:two_message_request) do
+      [
+        { role: 'user', content: 'What is the capital of France?', cache_control: { type: 'ephemeral' } },
+        { role: 'assistant', content: 'Paris.' }
+      ]
+    end
+
+    let(:tool_set) do
+      {
+        get_weather: {
+          name: 'get_weather',
+          description: 'Get the current weather for a city',
+          parameters: { type: 'object', properties: { city: { type: 'string' } }, required: %w[city] }
+        }
+      }
+    end
+
+    it 'renders a 2-message sync chat whose first message carries the prompt-cache :cache_control key' do
+      # render_payload is the production render seam (Provider#complete ->
+      # render_payload); calling it directly keeps the example HTTP-free. Pre-fix
+      # this raised ArgumentError 'unknown keyword: :cache_control' in
+      # Canonical::Message.from_hash before any HTTP.
+      wire = nil
+      expect do
+        wire = provider.send(
+          :render_payload,
+          two_message_request,
+          tools: tool_set, temperature: nil, model: model_id,
+          stream: false, schema: nil, thinking: nil, tool_prefs: nil
+        )
+      end.not_to raise_error
+
+      expect(wire).to be_a(Hash)
+      expect(wire[:model]).to eq(model_id)
+      expect(wire[:stream]).to be(false)
+      expect(wire[:messages].size).to eq(2)
+      expect(wire[:messages].map { |m| m[:role] }).to eq(%w[user assistant])
+      expect(wire[:messages].first[:content]).to eq('What is the capital of France?')
+      expect(wire[:tools].size).to eq(1)
+      expect(wire.dig(:tools, 0, :function, :name)).to eq('get_weather')
+      # The transport-only key never leaks onto the wire
+      wire[:messages].each { |m| expect(m).not_to have_key(:cache_control) }
+    end
+
+    it 'builds canonical messages from the prompt-cache message hashes, dropping the transport-only :cache_control' do
+      canonical = provider.send(:build_canonical_messages, two_message_request)
+
+      expect(canonical).to all(be_a(Legion::Extensions::Llm::Canonical::Message))
+      expect(canonical.map(&:role)).to eq(%i[user assistant])
+      expect(canonical.map(&:content)).to eq(['What is the capital of France?', 'Paris.'])
+      expect(Legion::Extensions::Llm::Canonical::Message.members).not_to include(:cache_control)
+    end
+
+    it 'completes a 2-message sync chat through the full provider path (render -> HTTP -> parse)' do
+      # The Connection#post boundary is stubbed by the outer before block. If the
+      # render path raised (the pre-fix crash), the request never reached HTTP.
+      result = nil
+      expect do
+        result = provider.chat(messages: two_message_request, model: model_id, tools: tool_set)
+      end.not_to raise_error
+
+      expect(result).to be_a(Legion::Extensions::Llm::Message)
+      expect(result.content).to eq('conformance')
+    end
+
+    it 'normalizes a non-UTF-8 (ASCII-8BIT) RuntimeError message into a valid ProviderOutcome, not a ValidationError' do
+      binary = "vllm dispatch failed: \xFF\xFE invalid body bytes \x80\x81".dup.force_encoding(Encoding::ASCII_8BIT)
+      error = RuntimeError.new(binary)
+
+      outcome = nil
+      expect { outcome = callable.normalize_dispatch_error(error: error) }.not_to raise_error
+
+      expect(outcome).to be_a(Legion::Extensions::Llm::Routing::ProviderOutcome)
+      expect(outcome.kind).to eq(:provider_error)
+      expect(outcome.reason).to be_a(String)
+      expect(outcome.reason.encoding).to eq(Encoding::UTF_8)
+      expect(outcome.reason).to be_valid_encoding
+      expect(outcome.reason).to start_with('vllm dispatch failed: ')
+      expect(outcome.reason).to include('invalid body bytes')
+    end
+
+    it 'normalizes a Faraday::ServerError with a non-UTF-8 message/body into a valid ProviderOutcome' do
+      env = Faraday::Env.new
+      env[:status] = 500
+      env[:headers] = {}
+      env[:body] = "raw upstream body \xFF\xFE"
+      error = Faraday::ServerError.new(
+        "500 - raw upstream body \xFF\xFE".dup.force_encoding(Encoding::ASCII_8BIT), env
+      )
+
+      outcome = nil
+      expect { outcome = callable.normalize_dispatch_error(error: error) }.not_to raise_error
+
+      expect(outcome.kind).to eq(:provider_error)
+      expect(outcome.reason.encoding).to eq(Encoding::UTF_8)
+      expect(outcome.reason).to be_valid_encoding
+      expect(outcome.reason).to start_with('500 - raw upstream body ')
     end
   end
 

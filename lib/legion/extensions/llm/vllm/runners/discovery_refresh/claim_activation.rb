@@ -27,16 +27,21 @@ module Legion
                 )
               end
 
-              def claim_and_activate_instance(name:, instance_id:, instance_cfg:)
+              # The operator's CONFIG NAME is the instance identity
+              # (InstanceKey.instance_id); the derived host:port/ak string is
+              # the secondary physical_id (dedup/diagnostics, never identity).
+              def claim_and_activate_instance(name:, instance_cfg:)
                 instance_key = Legion::Extensions::Llm::Inventory::Identity::InstanceKey.new(
-                  provider_family: :vllm, instance_id: instance_id
+                  provider_family: :vllm, instance_id: name,
+                  physical_id: derive_physical_id(instance_cfg: instance_cfg)
                 )
                 callable = Legion::Extensions::Llm::Vllm::VllmCallable.new(instance_cfg: instance_cfg, logger: log)
                 probe_coordinator = Legion::Extensions::Llm::Inventory::ProbeCoordinator.new(
-                  instance_key: instance_key, enqueue: build_probe_enqueue(instance_id: instance_id)
+                  instance_key: instance_key, enqueue: build_probe_enqueue(instance_id: name)
                 )
                 publisher_token = publisher.claim_instance(
-                  instance_id: instance_id, callable: callable, probe_request_handle: probe_coordinator
+                  instance_id: name, physical_id: instance_key.physical_id,
+                  callable: callable, probe_request_handle: probe_coordinator
                 )
 
                 # Store state BEFORE readiness so a failed boot probe leaves a
@@ -46,10 +51,10 @@ module Legion
                   callable: callable, probe_coordinator: probe_coordinator,
                   publisher_token: publisher_token, sequence: 0, offerings: []
                 }
-                instance_states[instance_id] = state
+                instance_states[name] = state
 
                 offerings = fetch_offerings(instance_cfg: instance_cfg, instance_key: instance_key)
-                perform_readiness(instance_id: instance_id, state: state, offerings: offerings)
+                perform_readiness(instance_id: name, state: state, offerings: offerings)
               end
 
               # Run a readiness probe and commit the outcome. While the instance
