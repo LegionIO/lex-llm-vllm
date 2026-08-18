@@ -215,16 +215,34 @@ RSpec.describe Legion::Extensions::Llm::Vllm do
     end
 
     # D3: the synthetic instances.default template (always present from
-    # provider_settings) must NOT be claimed — it is the phantom localhost
-    # target, not a real instance.
-    it 'skips the synthetic :default template (no phantom localhost instance)' do
+    # provider_settings) must NOT be claimed while it is the unmodified
+    # extension default — it is the phantom localhost target, not a real
+    # instance. (The house spec style asserts the claimable-set exclusion;
+    # log lines are not asserted — the test logger is nulled.)
+    it 'skips the synthetic :default while it is the unmodified template' do
       stub_vllm_instances(
-        default: { endpoint: 'http://localhost:8000', tier: :direct, credentials: { api_key: nil } },
+        default: described_class.default_settings.dig(:instances, :default),
         apollo: { vllm_api_base: 'http://apollo:8000' }
       )
       instances = described_class.discover_instances
 
       expect(instances.keys).to eq([:apollo])
+    end
+
+    # v2 parity: a configured 'default' (operator/auto-install values that
+    # differ from the synthetic template) is a real instance and must pass
+    # the provider layer. This asserts the provider-layer decision (the
+    # claimable set); the claim itself is lex-llm's, and the local bundle
+    # resolves lex-llm 0.7.2, which still reserves the name.
+    it 'keeps a configured :default (values differing from the template) in the claimable set' do
+      configured_default = described_class.default_settings
+                                          .dig(:instances, :default)
+                                          .merge(vllm_api_base: 'http://apollo-001:8000')
+      stub_vllm_instances(default: configured_default, apollo: { vllm_api_base: 'http://apollo:8000' })
+      instances = described_class.discover_instances
+
+      expect(instances.keys).to contain_exactly(:default, :apollo)
+      expect(instances[:default]).to include(vllm_api_base: 'http://apollo-001:8000', tier: :direct)
     end
 
     # D3: an entry with no resolvable endpoint is unclaimable — skip it rather

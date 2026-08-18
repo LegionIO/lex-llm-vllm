@@ -24,12 +24,14 @@ RSpec.describe Legion::Extensions::Llm::Vllm::Runners::DiscoveryRefresh do
 
   let(:registry) { Legion::Extensions::Llm::Inventory::Registry }
 
-  # Default catalog: the synthetic :default template (D3 — must be skipped) plus
-  # two real instances. Health-sequence tests override this to a single instance
-  # so the check_health queue maps 1:1 to ticks.
+  # Default catalog: the UNMODIFIED synthetic :default template (D3 — must be
+  # skipped while unmodified; it is the extension's own registered instance
+  # defaults nested by provider_settings) plus two real instances.
+  # Health-sequence tests override this to a single instance so the
+  # check_health queue maps 1:1 to ticks.
   let(:raw_instances) do
     {
-      default: { endpoint: 'http://localhost:8000', tier: :direct, credentials: { api_key: nil } },
+      default: Legion::Extensions::Llm::Vllm.default_settings.dig(:instances, :default),
       apollo: { vllm_api_base: 'http://apollo:8000', tier: :local },
       helios: { vllm_api_base: 'http://helios:8001', tier: :local, vllm_api_key: 'sk-helios' }
     }

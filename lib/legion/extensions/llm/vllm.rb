@@ -51,13 +51,20 @@ module Legion
           configured = settings[:instances]
           if configured.is_a?(Hash)
             configured.each do |name, config|
-              # The synthetic instances.default template (always present from
-              # provider_settings) is not a real instance — claiming it would
-              # register and health-probe a phantom localhost target. Entries
-              # without a resolvable endpoint are equally unclaimable.
-              next if name.to_sym == :default
-
               normalized = normalize_instance_config(config)
+
+              # The synthetic instances.default template (always present from
+              # provider_settings) is an unconfigured phantom while it is the
+              # unmodified extension default — claiming it would register and
+              # health-probe a localhost target. A configured 'default'
+              # (operator/auto-install values differing from the template) is
+              # a real instance and stays claimable (v2 parity). Entries
+              # without a resolvable endpoint are equally unclaimable.
+              if unconfigured_default?(name: name, normalized: normalized)
+                log.warn('[vllm][discovery] action=skip_instance instance=default reason=synthetic_default')
+                next
+              end
+
               next if normalized[:vllm_api_base].to_s.strip.empty?
 
               instances[name.to_sym] = DEFAULT_INSTANCE_TIER.merge(normalized)
@@ -65,6 +72,20 @@ module Legion
           end
           log.debug { "discovered #{instances.size} vLLM instance(s): #{instances.keys.join(', ')}" }
           instances
+        end
+
+        # The synthetic default is the extension's OWN registered instance
+        # defaults (endpoint http://localhost:8000 + fleet/limits blocks),
+        # deep-merged into instances.default by provider_settings. It is
+        # "configured" only when the operator changed something.
+        def self.unconfigured_default?(name:, normalized:)
+          name.to_sym == :default && normalized == normalized_synthetic_default_instance
+        end
+
+        def self.normalized_synthetic_default_instance
+          @normalized_synthetic_default_instance ||= normalize_instance_config(
+            default_settings.dig(:instances, :default) || {}
+          )
         end
 
         def self.normalize_instance_config(config)
