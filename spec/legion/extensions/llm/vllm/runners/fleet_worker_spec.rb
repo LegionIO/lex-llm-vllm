@@ -21,7 +21,10 @@ RSpec.describe Legion::Extensions::Llm::Vllm::Runners::FleetWorker do
     allow(Legion::Extensions::Llm::Vllm).to receive(:discover_instances).and_return(instances)
     allow(Legion::Extensions::Llm::Fleet::ProviderResponder).to receive(:call).and_return(:ok)
 
-    result = described_class.handle_fleet_request(payload, delivery:, properties:)
+    # The Subscription dispatch calls `runner_class.send(fn, **message)` — the
+    # whole delivered envelope arrives as keyword arguments, never a positional
+    # payload.
+    result = described_class.handle_fleet_request(**payload, delivery: delivery, properties: properties)
 
     expect(result).to eq(:ok)
     expect(Legion::Extensions::Llm::Fleet::ProviderResponder).to have_received(:call).with(
@@ -29,6 +32,7 @@ RSpec.describe Legion::Extensions::Llm::Vllm::Runners::FleetWorker do
       provider_family: :vllm,
       provider_class: Legion::Extensions::Llm::Vllm::Provider,
       provider_instances: satisfy { |resolver| resolver.call == instances },
+      registry: Legion::Extensions::Llm::Inventory::Registry,
       delivery: delivery,
       properties: properties
     )

@@ -1,15 +1,7 @@
 # frozen_string_literal: true
 
-require 'digest'
-
 begin
   require 'legion/extensions/actors/every'
-rescue LoadError => e
-  warn(e.message) if $VERBOSE
-end
-
-begin
-  require 'legion/extensions/llm/inventory/scoped_refresher'
 rescue LoadError => e
   warn(e.message) if $VERBOSE
 end
@@ -21,135 +13,30 @@ module Legion
     module Llm
       module Vllm
         module Actor
-          # Periodic actor that refreshes the vLLM discovered model list.
+          # Periodic trigger for vLLM discovery. Stateless: it fires on the
+          # configured discovery interval and dispatches to
+          # Runners::DiscoveryRefresh, which owns the work and holds its
+          # process-local instance state.
           class DiscoveryRefresh < Legion::Extensions::Actors::Every
-            include Legion::Logging::Helper
+            include Legion::Extensions::Helpers::Lex
 
-            if defined?(Legion::Extensions::Llm::Inventory::ScopedRefresher)
-              include Legion::Extensions::Llm::Inventory::ScopedRefresher
-            end
-
-            def self.every_seconds = 300
-
-            def runner_class    = self.class
-            def runner_function = 'manual'
             def run_now?        = true
             def use_runner?     = false
-            def check_subtask?  = false
-            def generate_task?  = false
+            def runner_class    = 'Legion::Extensions::Llm::Vllm::Runners::DiscoveryRefresh'
+            def runner_function = 'refresh'
 
+            # Honor the registered discovery interval. A nil TimerTask interval
+            # fires once and then stops, so resolve to the registered default
+            # (300s) whenever the setting is missing or non-positive.
             def time
-              return self.class.every_seconds unless defined?(Legion::Settings)
-
-              Legion::Settings.dig(:extensions, :llm, :vllm, :discovery_interval) || self.class.every_seconds
+              interval = settings.dig(:discovery, :interval_seconds)&.to_i
+              interval&.positive? ? interval : 300
             end
 
-            def scope_key                = { provider: :vllm }
-            def offering_type(raw_type)  = %i[embed embedding].include?(raw_type) ? :embedding : :inference
-
-            def vllm_cfg
-              return unless defined?(Legion::Settings)
-
-              Legion::Settings.dig(:extensions, :llm,
-                                   :vllm)
-            end
-
-            def compute_lanes_for_scope(**)
-              return [] unless defined?(Legion::LLM::Call::Registry)
-
-              vllm_instances.flat_map { |entry| lanes_from_instance(entry) }
+            def shutdown
+              Legion::Extensions::Llm::Vllm::Runners::DiscoveryRefresh.remove_all_instances
             rescue StandardError => e
-              handle_exception(e, level: :warn, handled: true, operation: 'vllm.actor.compute_lanes_for_scope')
-              []
-            end
-
-            def credential_hash(**)
-              cfg = vllm_cfg
-              Digest::SHA256.hexdigest(cfg&.dig(:api_key).to_s + cfg&.dig(:instances).to_s)[0, 16]
-            rescue StandardError
-              'unknown'
-            end
-
-            def manual
-              run_scoped_tick
-            rescue StandardError => e
-              handle_exception(e, level: :warn, handled: true, operation: 'vllm.actor.discovery_refresh')
-            end
-
-            private
-
-            def run_scoped_tick
-              return unless defined?(Legion::Extensions::Llm::Inventory::ScopedRefresher)
-              return unless self.class.ancestors.include?(Legion::Extensions::Llm::Inventory::ScopedRefresher)
-
-              tick
-            end
-
-            def vllm_instances
-              Legion::LLM::Call::Registry.all_instances.select { |e| (e[:provider] || '').to_sym == :vllm }
-            end
-
-            def lanes_from_instance(instance_entry)
-              adapter = instance_entry[:adapter]
-              return [] unless adapter.respond_to?(:discover_offerings)
-
-              Array(adapter.discover_offerings(live: true)).flat_map do |offering|
-                raw  = offering_to_hash(offering)
-                lane = build_lane(raw, instance_entry)
-                fleet = maybe_fleet_lane(lane)
-                fleet ? [lane, fleet] : [lane]
-              end
-            end
-
-            # ModelOffering objects do not implement `[]`; normalize to a Hash so the
-            # rest of the writer stays Hash-shaped. Hash inputs pass through untouched.
-            def offering_to_hash(offering)
-              return offering if offering.is_a?(Hash)
-
-              hash = offering.to_h
-              hash[:type] ||= hash[:usage_type]
-              hash[:enabled] = offering.respond_to?(:enabled?) ? offering.enabled? : true
-              hash
-            end
-
-            def build_lane(offering, instance_entry) # rubocop:disable Metrics/AbcSize,Metrics/CyclomaticComplexity
-              tier            = offering[:tier] || :direct
-              type            = offering_type(offering[:type])
-              instance_id     = offering[:instance_id] ||
-                                instance_entry[:instance] ||
-                                instance_entry[:instance_id] ||
-                                instance_entry[:id]
-              provider_family = offering[:provider_family] || :vllm
-              model           = offering[:model]
-              lane_id = Legion::Extensions::Llm::Inventory::ScopedRefresher.compose_id(
-                tier: tier, provider_family: provider_family, instance_id: instance_id, type: type, model: model
-              )
-              { id: lane_id, tier: tier, provider_family: provider_family, instance_id: instance_id,
-                model: model, canonical_model_alias: offering[:canonical_model_alias], type: type,
-                capabilities: normalize_caps(offering[:capabilities]),
-                limits: offering[:limits] || {}, enabled: offering.fetch(:enabled, true), cost: offering[:cost] || {} }
-            end
-
-            def maybe_fleet_lane(lane)
-              return unless lane[:type] == :inference && vllm_cfg&.dig(:fleet, :dispatch, :enabled)
-
-              fleet_id = Legion::Extensions::Llm::Inventory::ScopedRefresher.compose_id(
-                tier: :fleet, provider_family: lane[:provider_family],
-                instance_id: lane[:instance_id], type: lane[:type], model: lane[:model]
-              )
-              lane.merge(id: fleet_id, tier: :fleet)
-            end
-
-            def normalize_caps(caps)
-              # Inventory::Capabilities lives in lex-llm; the previous fallback (`return []
-              # unless defined?(...)`) silently swallowed every capability the operator
-              # declared via enable_thinking/enable_tools when the constant wasn't loaded.
-              # Always normalize through the shared vocabulary so aliases collapse.
-              if defined?(Legion::Extensions::Llm::Inventory::Capabilities)
-                Legion::Extensions::Llm::Inventory::Capabilities.normalize(caps)
-              else
-                Array(caps).compact.map(&:to_sym).uniq
-              end
+              handle_exception(e, level: :warn, operation: 'vllm.actor.discovery_refresh.shutdown')
             end
           end
         end

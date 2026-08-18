@@ -1,5 +1,97 @@
 # Changelog
 
+## [0.4.5] - 2026-08-18
+
+### Fixed
+- **Remove synthetic-default discovery suppression and its warning throttle.** The `default` instance now follows the same endpoint-based discovery path as every other configured instance; no synthetic-default skip warning is emitted.
+
+## [0.4.4] - 2026-08-17
+
+### Fixed
+- **Single actor registration — the provider module no longer extends Core at file level.** The boot-time recursive submodule walk (gated on `respond_to?(:autobuild)`) no longer sees the provider at preload and skips it, so the gem's own top-level extension load is the sole actor registration — this eliminates the twin-actor double-claim (FencedPublisherError) the double build produced under SSOT v3's Inventory::Registry claim tokens.
+- **Multi-message requests carrying the prompt-cache `cache_control` key no longer fail before HTTP.** legion-llm's prompt-cache step injects `cache_control: {type: :ephemeral}` into every ≥2-message request; the canonical message bridge raised `ArgumentError: unknown keyword: :cache_control` in `Message.from_hash` before any HTTP was sent, so every multi-message vLLM request 500ed. The bridge now projects onto the known member set, so the transport-only key is dropped and never leaks onto the wire.
+- **Non-UTF-8 (ASCII-8BIT) dispatch error messages no longer mask the original error.** `RecordSupport.sanitized_reason` now coerces to valid UTF-8 instead of raising `ValidationError`, so a real provider error is no longer turned into an unclassifiable retriable 500.
+- **Adds dispatch-boundary regression specs** — 2-message `cache_control` sync render, canonical member projection, and the full provider render-to-parse path — proven to fail pre-fix.
+- **The synthetic-default skip warn now fires once per boot instead of every discovery tick.** The `action=skip_instance instance=default reason=synthetic_default` WARN fired on every 300s discovery tick — the fleet's noisiest log line, since a provider being unconfigured-for-default is the normal state. It is now throttled to a single warning at first occurrence (the operator signal: `instances.default` is still the unmodified template; set a real config to publish it).
+
+## [0.4.3] - 2026-08-16
+
+### Fixed
+- **Instance identity is now the operator's config NAME** — the discovery
+  runner previously keyed instances by the derived `host:port/ak:<digest>`
+  string. The derived id silently inerted the router's `instances.<name>`
+  settings lookups (per-instance tuning, weight, preferred context windows)
+  and collapsed distinct config names that share an endpoint. Discovery now
+  publishes `InstanceKey.instance_id` = the config name and carries the
+  derived `host:port/ak:<digest>` in the secondary `physical_id` field
+  (dedup/diagnostics only — it never participates in identity). Two config
+  names pointing at the same endpoint stay distinct instances; an endpoint or
+  API-key move under a stable name re-claims the instance so the captured
+  callable tracks the new endpoint. Zero config changes required.
+- **Embedding models now authoritatively exclude chat** — an embedding model
+  (`type: embedding` or `capabilities: [embedding]` in the vLLM catalog)
+  published `chat: :supported`, so a plain chat request could be misrouted to
+  an embedding-only instance. The offering builder now branches operation
+  evidence on model type (matching bedrock): embedding models publish
+  `chat`/`stream_chat`/`count_tokens` and the non-embedding media operations
+  as `:unsupported` and `embed` as `:supported`; chat models are unchanged
+  (`chat`/`stream_chat` `:supported`, `embed` `:unsupported`).
+- **`tools` capability evidence was permanently `:unknown`** — `resolve_bool_cap`
+  returned `:unknown` for every configuration (absent, `enable_tools: true`, or
+  `false`), so the router's candidate evaluator never saw a ready candidate for
+  any request requiring the `tools` capability and rejected every tool-using
+  request (e.g. Claude Code `/v1/messages`) with typed `too_early` (425/529)
+  indefinitely. vLLM serves tool calling as an engine capability for every chat
+  model and this provider's translator implements the full tool loop, so the
+  builder now publishes `tools: :supported` with `:provider_implementation`
+  source. An explicit `enable_tools: false` (model level, else instance level)
+  remains an operator opt-out expressed as `:unknown` with the matching
+  override source — override sources may never carry `:supported` under the
+  SSOT v3 tri-state evidence contract.
+- **`thinking` capability evidence semantics made explicit** — support is a
+  per-model chat-template fact the vLLM catalog does not expose, and a config
+  permission is not evidence, so it stays `:unknown` in every configuration
+  (override source when `enable_thinking` is set at model/instance level,
+  `:default_false` otherwise).
+
+## [0.4.2] - 2026-08-13
+
+### Fixed
+- **Removed ALL remaining `rubocop:disable` directives** — zero directives across `lib/` and `spec/`. Every suppressed metric resolved by real refactoring: `translator.rb` split into 9 focused modules (`TranslatorMessageHelpers`, `TranslatorToolCallHelpers`, `TranslatorToolHelpers`, `TranslatorParamHelpers`, `TranslatorThinkingHelpers`, `TranslatorToolCallParseHelpers`, `TranslatorResponseHelpers`, `TranslatorChunkBuilderHelpers`, `TranslatorChunkHelpers`, `TranslatorRenderHelpers`), bringing every class/module under the 100-line limit.
+- **Reverted `.rubocop.yml` weakening** — removed `Metrics/ClassLength: Exclude` for `provider.rb` added in prior pass; class genuinely reduced by module extraction.
+- **§9 default substitution removed** — `translator.rb` `extract_wire_model` now raises `ArgumentError` when no model is present rather than substituting `'default'`.
+- **§1 settings guards removed** — `global_thinking_enabled?` in `provider.rb` no longer uses `defined?(Legion::Settings)` or `Legion::Settings.dig`; replaced with `settings[:enable_thinking]` bracket access.
+- **§1 swallowed rescue fixed** — `extract_host_port` in `discovery_refresh.rb` now calls `handle_exception` instead of silently swallowing `URI::InvalidURIError`.
+- **Settings-authoritative embedding removed** — `embedding_supported?` in `discovery_refresh.rb` uses only server evidence (`model_data[:type]` or `model_data[:capabilities]`); `instance_cfg:` parameter eliminated.
+- **`api_base` correctly navigates instance settings** — reads `settings.dig(:instances, :default, :endpoint)` (the registered default) instead of the non-existent top-level `settings[:endpoint]` key.
+- **Ruby constant lexical scope fixed** — `SUPPORTED_PARAMS`, `PARAM_WIRE_KEYS`, and `FALLBACK_STOP_REASON` moved into the modules that reference them (`TranslatorParamHelpers` and `TranslatorChunkHelpers`) so constant lookup works correctly without the including class.
+- **`RSpec/SpecFilePathFormat` fixed** — `fleet_worker_spec.rb` moved from `spec/.../vllm/actors/` (plural) to `spec/.../vllm/actor/` (singular) to match the `Actor::FleetWorker` module path.
+- **Conformance fixtures updated** — all canonical request fixtures in `lex-llm` now include `"metadata": {"model": "test-fixture-model"}`, required for §9-compliant translators that raise on absent model.
+
+## [0.4.1] - 2026-08-13
+
+### Fixed
+- **§8 health firewall enforced in harness and callable.** `instance_unavailable_error` now returns an explicit vLLM offline HTTP 503 response (body contains "server is going offline"); `classify_server_error_ext` detects this specific body text to return `:instance_unavailable`. Connection failures, generic 503s, and timeouts are never promoted to `:instance_unavailable`. Adds a firewall proof test.
+- **Removed all `rubocop:disable` directives** from `provider.rb` and the conformance spec. All metrics (AbcSize, ParameterLists, CyclomaticComplexity, PerceivedComplexity, ModuleLength) resolved by extraction instead of suppression.
+- **`provider.rb` ParameterLists compliance.** `build_canonical_request` and `render_payload` now use `**opts` passthrough, reducing explicit parameter lists to ≤5.
+- **`discovery_refresh.rb` ParameterLists compliance.** `store_instance_state` uses `**opts` for the trailing group of mutable-state params.
+- **`DiscoveryRefreshEvidenceBuilders` ModuleLength compliance.** Value-evidence methods (`build_context_evidence`, `build_max_output_evidence`, `build_embedding_dimensions_evidence`, `build_model_revision_evidence`, `build_tokenizer_evidence`, and helpers) extracted to new `DiscoveryRefreshValueEvidenceHelpers` module.
+- **Conformance spec `MultipleMemoizedHelpers` compliance.** Removed the file-level `rubocop:disable/enable` wrapper; all four over-limit describe blocks reduced to ≤3 lets per group by converting extras to `def` methods or consolidating into a `setup` hash let.
+- **`offering_attrs` uses `provider_instance_id`**, not `config.instance_id` (which does not exist on `Legion::Extensions::Llm::Configuration`).
+
+## [0.4.0] - 2026-08-13
+
+### Changed
+- **SSOT v3 provider migration.** Rewrite `DiscoveryRefresh` actor to publish exact vLLM instances through the lex-llm 0.7.0 `Inventory::Publisher` contract. Each configured vLLM server now claims an independent exact `InstanceKey`, builds complete `OfferingDraft` snapshots with honest per-operation evidence, gates selector visibility behind immediate `/health` readiness, and supports probe-cleared exact-instance availability.
+- Raise `lex-llm` gemspec floor to `>= 0.7.0`.
+- Remove all `Legion::LLM::Call::Registry` reverse references; discovery no longer scans loaded providers through the coordinator.
+- Remove `ScopedRefresher` mixin and `compose_id` delimiter lane IDs; use canonical `lane:v1:` SHA-256 framed identity.
+- Derive stable InstanceKey per independently addressable vLLM server: normalized `host:port` plus non-secret auth fingerprint.
+- Normalize dispatch errors via `ProviderOutcome`; only an explicit flat service-unavailable (never raw 503/timeout/connection error) may return `instance_unavailable`.
+- Advertise `exact_offering_v1` fleet execution contract with exact offering/operation/model/instance verification.
+- Register `discovery_interval: 300` as a documented extension default; read directly without `.dig`/`||` fallback guards.
+- Add comprehensive SSOT v3 conformance specs including the shared `'an SSOT v3 provider adapter'` examples.
+
 ## [0.3.17] - 2026-08-04
 
 ### Fixed

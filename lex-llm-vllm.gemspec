@@ -25,7 +25,10 @@ Gem::Specification.new do |spec|
 
   spec.add_dependency 'legion-json', '>= 1.2.1'
   spec.add_dependency 'legion-logging', '>= 1.3.2'
-  spec.add_dependency 'legion-settings', '>= 1.3.14'
+  spec.add_dependency 'legion-settings', '>= 1.4.2'
   spec.add_dependency 'legion-transport', '>= 1.4.14'
-  spec.add_dependency 'lex-llm', '>= 0.6.16'
+  # 0.7.1 adds InstanceKey#physical_id (secondary physical identity) — the
+  # discovery runner claims with physical_id:, so the floor must not resolve
+  # to a lex-llm without the field.
+  spec.add_dependency 'lex-llm', '>= 0.7.1'
 end

@@ -183,27 +183,12 @@ RSpec.describe Legion::Extensions::Llm::Vllm do
   end
 
   describe '.discover_instances' do
-    before do
-      allow(Legion::Extensions::Llm::CredentialSources).to receive_messages(http_ok?: false, setting: nil)
-    end
-
-    it 'returns local instance when vLLM health endpoint is reachable' do
-      stub_local_health(true)
-      instances = described_class.discover_instances
-
-      expect(instances[:local]).to eq(
-        vllm_api_base: 'http://localhost:8000', tier: :local, capabilities: [:completion]
-      )
-    end
-
-    it 'omits local instance when vLLM health endpoint is unreachable' do
-      instances = described_class.discover_instances
-
-      expect(instances).not_to have_key(:local)
+    def stub_vllm_instances(value)
+      allow(described_class).to receive(:settings).and_return({ instances: value })
     end
 
     it 'returns configured instances from extension settings' do
-      stub_vllm_settings({ gpu_cluster: { vllm_api_base: 'http://gpu-node:8000' } })
+      stub_vllm_instances({ gpu_cluster: { vllm_api_base: 'http://gpu-node:8000' } })
       instances = described_class.discover_instances
 
       expect(instances[:gpu_cluster]).to eq(vllm_api_base: 'http://gpu-node:8000', tier: :direct,
@@ -211,8 +196,8 @@ RSpec.describe Legion::Extensions::Llm::Vllm do
                                             provider_capabilities: { streaming: true })
     end
 
-    it 'normalizes base_url from Legion settings to vllm_api_base' do
-      stub_vllm_settings({ apollo: { base_url: 'http://10.11.164.92:8000/v1' } })
+    it 'normalizes base_url from settings to vllm_api_base' do
+      stub_vllm_instances({ apollo: { base_url: 'http://10.11.164.92:8000/v1' } })
       instances = described_class.discover_instances
 
       expect(instances[:apollo]).to include(vllm_api_base: 'http://10.11.164.92:8000',
@@ -220,8 +205,8 @@ RSpec.describe Legion::Extensions::Llm::Vllm do
       expect(instances[:apollo]).not_to have_key(:base_url)
     end
 
-    it 'normalizes endpoint aliases from Legion settings to vllm_api_base' do
-      stub_vllm_settings({ apollo: { endpoint: 'http://10.11.164.92:8000/v1' } })
+    it 'normalizes endpoint aliases from settings to vllm_api_base' do
+      stub_vllm_instances({ apollo: { endpoint: 'http://10.11.164.92:8000/v1' } })
       instances = described_class.discover_instances
 
       expect(instances[:apollo]).to include(vllm_api_base: 'http://10.11.164.92:8000',
@@ -229,30 +214,54 @@ RSpec.describe Legion::Extensions::Llm::Vllm do
       expect(instances[:apollo]).not_to have_key(:endpoint)
     end
 
-    it 'returns both local and configured instances when both are available' do
-      stub_local_health(true)
-      stub_vllm_settings({ remote: { vllm_api_base: 'http://remote:8000' } })
-      instances = described_class.discover_instances
+    it 'keeps the default instance in the claimable set' do
+      stub_vllm_instances(
+        default: described_class.default_settings.dig(:instances, :default),
+        apollo: { vllm_api_base: 'http://apollo:8000' }
+      )
 
-      expect(instances.keys).to contain_exactly(:local, :remote)
-      expect(instances[:local][:tier]).to eq(:local)
-      expect(instances[:remote][:tier]).to eq(:direct)
+      instances = described_class.discover_instances
+      expect(instances.keys).to contain_exactly(:default, :apollo)
+      expect(instances[:default]).to include(vllm_api_base: 'http://localhost:8000', tier: :direct)
     end
 
-    it 'returns empty hash when nothing is available' do
+    it 'keeps a configured :default (values differing from the template) in the claimable set' do
+      configured_default = described_class.default_settings
+                                          .dig(:instances, :default)
+                                          .merge(vllm_api_base: 'http://apollo-001:8000')
+      stub_vllm_instances(default: configured_default, apollo: { vllm_api_base: 'http://apollo:8000' })
       instances = described_class.discover_instances
 
-      expect(instances).to eq({})
+      expect(instances.keys).to contain_exactly(:default, :apollo)
+      expect(instances[:default]).to include(vllm_api_base: 'http://apollo-001:8000', tier: :direct)
+    end
+
+    # D3: an entry with no resolvable endpoint is unclaimable — skip it rather
+    # than defaulting it to localhost.
+    it 'skips entries without a resolvable endpoint' do
+      stub_vllm_instances(
+        apollo: { vllm_api_base: 'http://apollo:8000' },
+        ghost: { tier: :direct }
+      )
+      instances = described_class.discover_instances
+
+      expect(instances.keys).to eq([:apollo])
+    end
+
+    it 'returns empty hash when no instances are configured' do
+      stub_vllm_instances({})
+
+      expect(described_class.discover_instances).to eq({})
     end
 
     it 'ignores settings when the value is not a Hash' do
-      stub_vllm_settings('not-a-hash')
+      stub_vllm_instances('not-a-hash')
 
       expect(described_class.discover_instances).to eq({})
     end
 
     it 'preserves explicit tier from configured instance settings' do
-      stub_vllm_settings({ edge: { vllm_api_base: 'http://edge-node:8000', tier: :fleet } })
+      stub_vllm_instances({ edge: { vllm_api_base: 'http://edge-node:8000', tier: :fleet } })
       instances = described_class.discover_instances
 
       expect(instances[:edge][:tier]).to eq(:fleet)
@@ -330,18 +339,6 @@ RSpec.describe Legion::Extensions::Llm::Vllm do
   def stub_registry_publisher
     allow(described_class).to receive(:registry_publisher).and_return(registry_publisher)
     allow(registry_publisher).to receive(:publish_models_async)
-  end
-
-  def stub_local_health(result)
-    allow(Legion::Extensions::Llm::CredentialSources).to receive(:http_ok?)
-      .with('http://localhost:8000', path: '/health', timeout: 0.1)
-      .and_return(result)
-  end
-
-  def stub_vllm_settings(value)
-    allow(Legion::Extensions::Llm::CredentialSources).to receive(:setting)
-      .with(:extensions, :llm, :vllm, :instances)
-      .and_return(value)
   end
 
   def capture_registry_events(models, readiness:)
