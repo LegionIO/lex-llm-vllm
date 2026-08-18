@@ -24,9 +24,8 @@ RSpec.describe Legion::Extensions::Llm::Vllm::Runners::DiscoveryRefresh do
 
   let(:registry) { Legion::Extensions::Llm::Inventory::Registry }
 
-  # Default catalog: the UNMODIFIED synthetic :default template (D3 — must be
-  # skipped while unmodified; it is the extension's own registered instance
-  # defaults nested by provider_settings) plus two real instances.
+  # Default catalog: the extension's :default template plus two configured
+  # instances. Discovery handles every endpoint-bearing instance uniformly.
   # Health-sequence tests override this to a single instance so the
   # check_health queue maps 1:1 to ticks.
   let(:raw_instances) do
@@ -109,11 +108,11 @@ RSpec.describe Legion::Extensions::Llm::Vllm::Runners::DiscoveryRefresh do
       expect(registry.snapshot.instance(instance_key: key(:helios)).availability.state).to eq(:available)
     end
 
-    it 'does NOT claim the synthetic :default template (D3 — no phantom localhost)' do
+    it 'claims the default template along with other endpoint-bearing instances' do
       runner.refresh
 
       claimed = registry.snapshot.each_instance.map { |record| record.instance_key.instance_id }.sort
-      expect(claimed).to eq(%w[apollo helios])
+      expect(claimed).to eq(%w[apollo default helios])
     end
 
     it 'publishes the config NAME as instance_id and the derived endpoint as the secondary physical_id' do
@@ -275,15 +274,18 @@ RSpec.describe Legion::Extensions::Llm::Vllm::Runners::DiscoveryRefresh do
   describe 'shutdown' do
     it 'removes all instances from the registry and clears state + display health' do
       runner.refresh
-      expect(runner.instance_states.size).to eq(2)
+      expect(runner.instance_states.size).to eq(3)
 
       runner.remove_all_instances
 
       expect(runner.instance_states.size).to eq(0)
       expect(registry.snapshot.instance(instance_key: key(:apollo))).to be_nil
       expect(registry.snapshot.instance(instance_key: key(:helios))).to be_nil
+      expect(registry.snapshot.instance(instance_key: key(:default))).to be_nil
       expect(settings_tree.dig(:instances, :apollo, :health)).to be_nil
       expect(settings_tree.dig(:instances, :apollo, :capabilities)).to be_nil
+      expect(settings_tree.dig(:instances, :default, :health)).to be_nil
+      expect(settings_tree.dig(:instances, :default, :capabilities)).to be_nil
     end
   end
 
