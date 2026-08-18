@@ -3,6 +3,7 @@
 ## [0.4.4] - 2026-08-17
 
 ### Fixed
+- **Single actor registration — the provider module no longer extends Core at file level.** The boot-time recursive submodule walk (gated on `respond_to?(:autobuild)`) no longer sees the provider at preload and skips it, so the gem's own top-level extension load is the sole actor registration — this eliminates the twin-actor double-claim (FencedPublisherError) the double build produced under SSOT v3's Inventory::Registry claim tokens.
 - **Multi-message requests carrying the prompt-cache `cache_control` key no longer fail before HTTP.** legion-llm's prompt-cache step injects `cache_control: {type: :ephemeral}` into every ≥2-message request; the canonical message bridge raised `ArgumentError: unknown keyword: :cache_control` in `Message.from_hash` before any HTTP was sent, so every multi-message vLLM request 500ed. The bridge now projects onto the known member set, so the transport-only key is dropped and never leaks onto the wire.
 - **Non-UTF-8 (ASCII-8BIT) dispatch error messages no longer mask the original error.** `RecordSupport.sanitized_reason` now coerces to valid UTF-8 instead of raising `ValidationError`, so a real provider error is no longer turned into an unclassifiable retriable 500.
 - **Adds dispatch-boundary regression specs** — 2-message `cache_control` sync render, canonical member projection, and the full provider render-to-parse path — proven to fail pre-fix.

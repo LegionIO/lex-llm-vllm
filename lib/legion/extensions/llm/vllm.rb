@@ -11,7 +11,6 @@ module Legion
     module Llm
       # Vllm provider extension namespace.
       module Vllm
-        extend ::Legion::Extensions::Core if ::Legion::Extensions.const_defined?(:Core, false)
         extend Legion::Logging::Helper
         extend Legion::Extensions::Llm::AutoRegistration
 
