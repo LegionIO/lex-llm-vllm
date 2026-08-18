@@ -52,18 +52,6 @@ module Legion
             configured.each do |name, config|
               normalized = normalize_instance_config(config)
 
-              # The synthetic instances.default template (always present from
-              # provider_settings) is an unconfigured phantom while it is the
-              # unmodified extension default — claiming it would register and
-              # health-probe a localhost target. A configured 'default'
-              # (operator/auto-install values differing from the template) is
-              # a real instance and stays claimable (v2 parity). Entries
-              # without a resolvable endpoint are equally unclaimable.
-              if unconfigured_default?(name: name, normalized: normalized)
-                warn_unconfigured_default
-                next
-              end
-
               next if normalized[:vllm_api_base].to_s.strip.empty?
 
               instances[name.to_sym] = DEFAULT_INSTANCE_TIER.merge(normalized)
@@ -71,39 +59,6 @@ module Legion
           end
           log.debug { "discovered #{instances.size} vLLM instance(s): #{instances.keys.join(', ')}" }
           instances
-        end
-
-        # The synthetic default is the extension's OWN registered instance
-        # defaults (endpoint http://localhost:8000 + fleet/limits blocks),
-        # deep-merged into instances.default by provider_settings. It is
-        # "configured" only when the operator changed something.
-        def self.unconfigured_default?(name:, normalized:)
-          name.to_sym == :default && normalized == normalized_synthetic_default_instance
-        end
-
-        # Warns exactly once per boot when the synthetic default template is
-        # skipped — the operator signal that instances.default is still the
-        # unmodified provider template (set a real config to publish it).
-        # Being unconfigured-for-default is the NORMAL state, and vllm's 300s
-        # discovery tick is the fleet's noisiest, so a per-tick warn is
-        # permanent log noise, not a warning.
-        def self.warn_unconfigured_default
-          return if @unconfigured_default_warned
-
-          @unconfigured_default_warned = true
-          log.warn('[vllm][discovery] action=skip_instance instance=default reason=synthetic_default')
-        end
-
-        # Clears the once-per-boot warn latch (specs share one process, where
-        # an earlier discovery tick may have latched it).
-        def self.reset_unconfigured_default_warn!
-          @unconfigured_default_warned = false
-        end
-
-        def self.normalized_synthetic_default_instance
-          @normalized_synthetic_default_instance ||= normalize_instance_config(
-            default_settings.dig(:instances, :default) || {}
-          )
         end
 
         def self.normalize_instance_config(config)

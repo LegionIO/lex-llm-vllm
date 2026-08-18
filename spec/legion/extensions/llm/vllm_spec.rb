@@ -214,37 +214,17 @@ RSpec.describe Legion::Extensions::Llm::Vllm do
       expect(instances[:apollo]).not_to have_key(:endpoint)
     end
 
-    # D3: the synthetic instances.default template (always present from
-    # provider_settings) must NOT be claimed while it is the unmodified
-    # extension default — it is the phantom localhost target, not a real
-    # instance. The skip warn fires EXACTLY ONCE per boot (the operator
-    # signal: set a real config to publish 'default'), not every tick —
-    # vllm's 300s tick is the fleet's noisiest. (The test logger is normally
-    # nulled; this example stubs it to assert the once-per-boot throttle.)
-    it 'skips the synthetic :default while it is the unmodified template and warns exactly once per boot' do
-      described_class.reset_unconfigured_default_warn!
-      warnings = []
-      fake_log = Object.new
-      fake_log.define_singleton_method(:warn) { |message = nil, **| warnings << message.to_s }
-      fake_log.define_singleton_method(:debug) { |*| nil }
-      allow(described_class).to receive(:log).and_return(fake_log)
+    it 'keeps the default instance in the claimable set' do
       stub_vllm_instances(
         default: described_class.default_settings.dig(:instances, :default),
         apollo: { vllm_api_base: 'http://apollo:8000' }
       )
 
       instances = described_class.discover_instances
-      expect(instances.keys).to eq([:apollo])
-      expect(described_class.discover_instances).to have_key(:apollo)
-
-      expect(warnings).to eq(['[vllm][discovery] action=skip_instance instance=default reason=synthetic_default'])
+      expect(instances.keys).to contain_exactly(:default, :apollo)
+      expect(instances[:default]).to include(vllm_api_base: 'http://localhost:8000', tier: :direct)
     end
 
-    # v2 parity: a configured 'default' (operator/auto-install values that
-    # differ from the synthetic template) is a real instance and must pass
-    # the provider layer. This asserts the provider-layer decision (the
-    # claimable set); the claim itself is lex-llm's, and the local bundle
-    # resolves lex-llm 0.7.2, which still reserves the name.
     it 'keeps a configured :default (values differing from the template) in the claimable set' do
       configured_default = described_class.default_settings
                                           .dig(:instances, :default)

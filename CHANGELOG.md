@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.4.5] - 2026-08-18
+
+### Fixed
+- **Remove synthetic-default discovery suppression and its warning throttle.** The `default` instance now follows the same endpoint-based discovery path as every other configured instance; no synthetic-default skip warning is emitted.
+
 ## [0.4.4] - 2026-08-17
 
 ### Fixed
