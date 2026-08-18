@@ -7,6 +7,7 @@
 - **Multi-message requests carrying the prompt-cache `cache_control` key no longer fail before HTTP.** legion-llm's prompt-cache step injects `cache_control: {type: :ephemeral}` into every ≥2-message request; the canonical message bridge raised `ArgumentError: unknown keyword: :cache_control` in `Message.from_hash` before any HTTP was sent, so every multi-message vLLM request 500ed. The bridge now projects onto the known member set, so the transport-only key is dropped and never leaks onto the wire.
 - **Non-UTF-8 (ASCII-8BIT) dispatch error messages no longer mask the original error.** `RecordSupport.sanitized_reason` now coerces to valid UTF-8 instead of raising `ValidationError`, so a real provider error is no longer turned into an unclassifiable retriable 500.
 - **Adds dispatch-boundary regression specs** — 2-message `cache_control` sync render, canonical member projection, and the full provider render-to-parse path — proven to fail pre-fix.
+- **The synthetic-default skip warn now fires once per boot instead of every discovery tick.** The `action=skip_instance instance=default reason=synthetic_default` WARN fired on every 300s discovery tick — the fleet's noisiest log line, since a provider being unconfigured-for-default is the normal state. It is now throttled to a single warning at first occurrence (the operator signal: `instances.default` is still the unmodified template; set a real config to publish it).
 
 ## [0.4.3] - 2026-08-16
 

@@ -60,7 +60,7 @@ module Legion
               # a real instance and stays claimable (v2 parity). Entries
               # without a resolvable endpoint are equally unclaimable.
               if unconfigured_default?(name: name, normalized: normalized)
-                log.warn('[vllm][discovery] action=skip_instance instance=default reason=synthetic_default')
+                warn_unconfigured_default
                 next
               end
 
@@ -79,6 +79,25 @@ module Legion
         # "configured" only when the operator changed something.
         def self.unconfigured_default?(name:, normalized:)
           name.to_sym == :default && normalized == normalized_synthetic_default_instance
+        end
+
+        # Warns exactly once per boot when the synthetic default template is
+        # skipped — the operator signal that instances.default is still the
+        # unmodified provider template (set a real config to publish it).
+        # Being unconfigured-for-default is the NORMAL state, and vllm's 300s
+        # discovery tick is the fleet's noisiest, so a per-tick warn is
+        # permanent log noise, not a warning.
+        def self.warn_unconfigured_default
+          return if @unconfigured_default_warned
+
+          @unconfigured_default_warned = true
+          log.warn('[vllm][discovery] action=skip_instance instance=default reason=synthetic_default')
+        end
+
+        # Clears the once-per-boot warn latch (specs share one process, where
+        # an earlier discovery tick may have latched it).
+        def self.reset_unconfigured_default_warn!
+          @unconfigured_default_warned = false
         end
 
         def self.normalized_synthetic_default_instance

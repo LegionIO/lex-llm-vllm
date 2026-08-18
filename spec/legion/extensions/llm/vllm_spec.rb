@@ -217,16 +217,27 @@ RSpec.describe Legion::Extensions::Llm::Vllm do
     # D3: the synthetic instances.default template (always present from
     # provider_settings) must NOT be claimed while it is the unmodified
     # extension default — it is the phantom localhost target, not a real
-    # instance. (The house spec style asserts the claimable-set exclusion;
-    # log lines are not asserted — the test logger is nulled.)
-    it 'skips the synthetic :default while it is the unmodified template' do
+    # instance. The skip warn fires EXACTLY ONCE per boot (the operator
+    # signal: set a real config to publish 'default'), not every tick —
+    # vllm's 300s tick is the fleet's noisiest. (The test logger is normally
+    # nulled; this example stubs it to assert the once-per-boot throttle.)
+    it 'skips the synthetic :default while it is the unmodified template and warns exactly once per boot' do
+      described_class.reset_unconfigured_default_warn!
+      warnings = []
+      fake_log = Object.new
+      fake_log.define_singleton_method(:warn) { |message = nil, **| warnings << message.to_s }
+      fake_log.define_singleton_method(:debug) { |*| nil }
+      allow(described_class).to receive(:log).and_return(fake_log)
       stub_vllm_instances(
         default: described_class.default_settings.dig(:instances, :default),
         apollo: { vllm_api_base: 'http://apollo:8000' }
       )
-      instances = described_class.discover_instances
 
+      instances = described_class.discover_instances
       expect(instances.keys).to eq([:apollo])
+      expect(described_class.discover_instances).to have_key(:apollo)
+
+      expect(warnings).to eq(['[vllm][discovery] action=skip_instance instance=default reason=synthetic_default'])
     end
 
     # v2 parity: a configured 'default' (operator/auto-install values that
