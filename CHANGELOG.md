@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.4.7] - 2026-08-19
+
+### Changed
+- Enforce the canonical dispatch boundary end to end: the fleet callable's chat, stream_chat, and count_tokens operations, and the provider's render seam, now reject plain-Hash messages with a loud ArgumentError instead of silently re-canonicalizing them. The lenient hash re-canonicalization masked the 2026-08-19 hash-bypass defect for 25 failed openai dispatches; it is removed.
+- Prompt-cache `cache_control` now rides as a first-class `Canonical::Message` member (lex-llm 0.7.7) instead of a transport-only hash key; the vLLM OpenAI-compatible wire render continues to drop it, so the wire format is unchanged.
+- Raise the `lex-llm` dependency floor to 0.7.7 for `Provider#enforce_canonical_messages!` and the `cache_control` canonical member.
+- Add a local-tree `lex-llm` path dependency to the test group so the adjacent checkout resolves against unreleased 0.7.7 during development.
+
+### Added
+- Cover the canonical boundary in the dispatch-boundary conformance block: canonical passthrough preserves the `cache_control` member, the wire never leaks it, and plain-Hash input raises at both the callable and the render seam.
+
 ## [0.4.6] - 2026-08-19
 
 ### Changed

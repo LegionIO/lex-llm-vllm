@@ -29,5 +29,5 @@ Gem::Specification.new do |spec|
   spec.add_dependency 'legion-transport', '>= 1.4.14'
   # 0.7.6 carries the write-time weight schema/reconciler and the immutable
   # OfferingDraft/OfferingRecord/LaneRecord weight pair used by this writer.
-  spec.add_dependency 'lex-llm', '>= 0.7.6'
+  spec.add_dependency 'lex-llm', '>= 0.7.7'
 end

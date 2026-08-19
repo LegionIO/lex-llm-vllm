@@ -217,8 +217,20 @@ module Legion
             model.respond_to?(:id) ? model.id : model.to_s
           end
 
+          # Canonical boundary: pipeline dispatch delivers Canonical::Message
+          # objects; the provider-native Chat facade delivers lex-llm Message.
+          # Both are object shapes this spoke converts to canonical. Plain
+          # Hashes are the bypass class (the 2026-08-19 incident) — reject
+          # loudly, never silently re-canonicalize.
           def build_canonical_messages(messages)
-            messages.filter_map { |msg| Canonical::Message.from_hash(msg.to_h) if msg.respond_to?(:to_h) }
+            messages.map do |msg|
+              next msg if msg.is_a?(Canonical::Message)
+              next Canonical::Message.from_hash(msg.to_h) if msg.is_a?(Legion::Extensions::Llm::Message)
+
+              raise ArgumentError,
+                    "vllm provider input must be Canonical::Message objects, got #{msg.class} — " \
+                    'non-canonical message shapes must not cross the dispatch boundary'
+            end
           end
 
           def build_canonical_tools(tools)
@@ -274,16 +286,11 @@ module Legion
           end
 
           def system_message?(msg)
-            role = msg.respond_to?(:role) ? msg.role.to_sym : message_hash_role(msg)
-            [:system, 'system'].include?(role)
-          end
-
-          def message_hash_role(msg)
-            msg[:role] || msg['role']
+            msg.role.to_sym == :system
           end
 
           def message_content_string(msg)
-            content = msg.respond_to?(:content) ? msg.content : (msg[:content] || msg['content'])
+            content = msg.content
             content.is_a?(String) ? content : nil
           end
         end

@@ -880,12 +880,13 @@ RSpec.describe Legion::Extensions::Llm::Vllm do
   end
 
   # ─── Dispatch boundary regression guards (live repro) ───────────────────────
-  # (B) legion-llm's prompt-cache step merges cache_control: { type: 'ephemeral' }
-  #     onto the last stable message hash of every >=2-message request. The
-  #     pre-fix Canonical::Message.from_hash did build(**h) with the whole hash,
-  #     so every multi-message vLLM request raised ArgumentError
-  #     'unknown keyword: :cache_control' before HTTP. from_hash now projects
-  #     onto the known member set.
+  # (B) legion-llm's prompt-cache step sets cache_control: { type: 'ephemeral' }
+  #     on the last stable message of every >=2-message request. As of lex-llm
+  #     0.7.7 that runs on CANONICAL objects (Message#with(cache_control:));
+  #     :cache_control is a first-class canonical member, and the provider
+  #     boundary rejects plain-Hash input loudly (the 2026-08-19 incident was a
+  #     Hash bypass silently re-canonicalized by this provider). The vLLM
+  #     OpenAI-compatible wire never carries the transport-only key.
   # (A) A non-UTF-8 (ASCII-8BIT) dispatch error message — a raw provider body or
   #     a Ruby kernel error — used to make RecordSupport.sanitized_reason raise
   #     ValidationError 'is not valid UTF-8', masking the real provider error as
@@ -897,13 +898,16 @@ RSpec.describe Legion::Extensions::Llm::Vllm do
     let(:provider) { Legion::Extensions::Llm::Vllm::Provider.new(config) }
     let(:callable) { ssot_harness.build_callable(instance_config: config) }
 
-    # The exact shape legion-llm's prompt-cache step produces
-    # (inference/steps/prompt_cache.rb#apply_conversation_breakpoint): a message
-    # hash that gained cache_control: { type: 'ephemeral' }.
+    # The exact shape legion-llm's prompt-cache step produces on canonical
+    # objects (inference/steps/prompt_cache.rb): the last stable message
+    # carries cache_control: { type: 'ephemeral' } as a canonical member.
     let(:two_message_request) do
       [
-        { role: 'user', content: 'What is the capital of France?', cache_control: { type: 'ephemeral' } },
-        { role: 'assistant', content: 'Paris.' }
+        Legion::Extensions::Llm::Canonical::Message.build(
+          role: :user, content: 'What is the capital of France?',
+          cache_control: { type: 'ephemeral' }
+        ),
+        Legion::Extensions::Llm::Canonical::Message.build(role: :assistant, content: 'Paris.')
       ]
     end
 
@@ -917,11 +921,11 @@ RSpec.describe Legion::Extensions::Llm::Vllm do
       }
     end
 
-    it 'renders a 2-message sync chat whose first message carries the prompt-cache :cache_control key' do
+    it 'renders a 2-message sync chat whose first canonical message carries the prompt-cache :cache_control member' do
       # render_payload is the production render seam (Provider#complete ->
-      # render_payload); calling it directly keeps the example HTTP-free. Pre-fix
-      # this raised ArgumentError 'unknown keyword: :cache_control' in
-      # Canonical::Message.from_hash before any HTTP.
+      # render_payload); calling it directly keeps the example HTTP-free.
+      # Canonical input with a :cache_control member must render to the
+      # OpenAI-compatible wire without leaking the transport-only key.
       wire = nil
       expect do
         wire = provider.send(
@@ -944,18 +948,38 @@ RSpec.describe Legion::Extensions::Llm::Vllm do
       wire[:messages].each { |m| expect(m).not_to have_key(:cache_control) }
     end
 
-    it 'builds canonical messages from the prompt-cache message hashes, dropping the transport-only :cache_control' do
+    it 'passes canonical messages through build_canonical_messages, preserving the :cache_control member' do
       canonical = provider.send(:build_canonical_messages, two_message_request)
 
       expect(canonical).to all(be_a(Legion::Extensions::Llm::Canonical::Message))
       expect(canonical.map(&:role)).to eq(%i[user assistant])
       expect(canonical.map(&:content)).to eq(['What is the capital of France?', 'Paris.'])
-      expect(Legion::Extensions::Llm::Canonical::Message.members).not_to include(:cache_control)
+      # The canonical schema EXTENDS to carry cache_control (lex-llm 0.7.7);
+      # the metadata is preserved on the canonical object and dropped only at
+      # the provider wire render, never by the canonical layer.
+      expect(Legion::Extensions::Llm::Canonical::Message.members).to include(:cache_control)
+      expect(canonical.map(&:cache_control)).to eq([{ type: 'ephemeral' }, nil])
+    end
+
+    it 'rejects plain Hash messages at the dispatch boundary instead of re-canonicalizing them' do
+      hash_request = [
+        { role: 'user', content: 'What is the capital of France?', cache_control: { type: 'ephemeral' } },
+        { role: 'assistant', content: 'Paris.' }
+      ]
+
+      # The 2026-08-19 defect class: hash messages silently re-canonicalized
+      # provider-side masked the bypass for 25 failed openai dispatches. The
+      # boundary now rejects loudly at both the callable and the render seam.
+      expect { callable.chat(messages: hash_request, model: model_id) }
+        .to raise_error(ArgumentError, /Canonical::Message/)
+      expect { provider.send(:render_payload, hash_request, stream: false, model: model_id) }
+        .to raise_error(ArgumentError, /Canonical::Message/)
     end
 
     it 'completes a 2-message sync chat through the full provider path (render -> HTTP -> parse)' do
       # The Connection#post boundary is stubbed by the outer before block. If the
-      # render path raised (the pre-fix crash), the request never reached HTTP.
+      # render path raised (hash input, unknown canonical members), the request
+      # never reached HTTP.
       result = nil
       expect do
         result = provider.chat(messages: two_message_request, model: model_id, tools: tool_set)
