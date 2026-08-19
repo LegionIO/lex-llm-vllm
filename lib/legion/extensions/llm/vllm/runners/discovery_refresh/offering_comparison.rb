@@ -16,11 +16,14 @@ module Legion
               ].freeze
 
               def offerings_equivalent?(previous, current)
-                Array(previous).map { |draft| offering_comparison_state(draft) } ==
-                  Array(current).map { |draft| offering_comparison_state(draft) }
+                offering_comparison_multiset(previous) == offering_comparison_multiset(current)
               end
 
               private
+
+              def offering_comparison_multiset(offerings)
+                Array(offerings).map { |draft| offering_comparison_state(draft) }.tally
+              end
 
               def offering_comparison_state(draft)
                 state = draft.to_h

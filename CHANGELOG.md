@@ -9,7 +9,7 @@
 - Raise the `lex-llm` dependency floor to 0.7.6; the existing `legion-settings` dependency remains unchanged.
 
 ### Fixed
-- Compare every offering contract field while excluding only non-authoritative evidence observation timestamps, preventing unchanged catalog passes from republishing snapshots while retaining real evidence and weight changes.
+- Compare the offering catalog as a duplicate-preserving multiset of complete contracts while excluding only non-authoritative evidence observation timestamps, preventing both reorder-only churn and accidental duplicate suppression while retaining real evidence and weight changes.
 - Complete startup discovery and weight validation before constructing a callable or claiming inventory, so malformed settings leave no orphaned initializing scope and the next valid cadence pass recovers without operator action.
 - Use a real in-memory IO sink for the test logger so Ruby 4 cannot fall back to stdout during the file-only RSpec release gate.
 

@@ -389,6 +389,51 @@ RSpec.describe Legion::Extensions::Llm::Vllm::Runners::DiscoveryRefresh do
       expect(runner.send(:offerings_equivalent?, [first], [second])).to be(true)
     end
 
+    it 'ignores equivalent catalog reordering without replacing or advancing the sequence' do
+      publisher = runner.publisher
+      replacements = replace_calls_for(publisher)
+      model_a = { id: 'model-a', max_model_len: 4096 }
+      model_b = { id: 'model-b', max_model_len: 8192 }
+      allow(runner).to receive(:fetch_models).and_return([model_a, model_b], [model_b, model_a])
+
+      runner.refresh
+      state = runner.instance_states.fetch('apollo')
+      sequence = state.fetch(:sequence)
+      runner.refresh
+
+      expect(replacements).to be_empty
+      expect(state.fetch(:sequence)).to eq(sequence)
+      expect(registry.snapshot.publication_status(instance_key: key(:apollo)).published_sequence).to eq(sequence)
+    end
+
+    it 'treats duplicate-count changes as significant without mutating cache on validation failure' do
+      runner.refresh
+      state = runner.instance_states.fetch('apollo')
+      original = state.fetch(:offerings)
+      duplicate = [original.first, original.first]
+      snapshot = registry.snapshot
+      published = snapshot.offerings_for(instance_key: key(:apollo))
+      generation = snapshot.generation
+      publisher = runner.publisher
+      replacements = replace_calls_for(publisher)
+      allow(runner).to receive(:fetch_offerings).and_return(duplicate)
+
+      expect do
+        runner.send(
+          :replace_if_changed, instance_id: 'apollo', state: state,
+                               instance_cfg: raw_instances[:apollo]
+        )
+      end.to raise_error(
+        Legion::Extensions::Llm::Inventory::Errors::ValidationError,
+        'duplicate provider_native_key'
+      )
+      expect(replacements.length).to eq(1)
+      expect(state.values_at(:sequence, :offerings)).to eq([0, original])
+      expect(registry.snapshot.offerings_for(instance_key: key(:apollo))).to eq(published)
+      expect(registry.snapshot.generation).to eq(generation)
+      expect(registry.snapshot.publication_status(instance_key: key(:apollo)).published_sequence).to eq(0)
+    end
+
     it 'publishes when evidence content changes' do
       publisher = runner.publisher
       replacements = replace_calls_for(publisher)
