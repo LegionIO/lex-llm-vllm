@@ -31,30 +31,32 @@ module Legion
               # (InstanceKey.instance_id); the derived host:port/ak string is
               # the secondary physical_id (dedup/diagnostics, never identity).
               def claim_and_activate_instance(name:, instance_cfg:)
+                instance_id = name.to_s
                 instance_key = Legion::Extensions::Llm::Inventory::Identity::InstanceKey.new(
-                  provider_family: :vllm, instance_id: name,
+                  provider_family: :vllm, instance_id: instance_id,
                   physical_id: derive_physical_id(instance_cfg: instance_cfg)
                 )
                 callable = Legion::Extensions::Llm::Vllm::VllmCallable.new(instance_cfg: instance_cfg, logger: log)
                 probe_coordinator = Legion::Extensions::Llm::Inventory::ProbeCoordinator.new(
-                  instance_key: instance_key, enqueue: build_probe_enqueue(instance_id: name)
+                  instance_key: instance_key, enqueue: build_probe_enqueue(instance_id: instance_id)
                 )
                 publisher_token = publisher.claim_instance(
-                  instance_id: name, physical_id: instance_key.physical_id,
+                  instance_id: instance_id, physical_id: instance_key.physical_id,
                   callable: callable, probe_request_handle: probe_coordinator
                 )
-
-                # Store state BEFORE readiness so a failed boot probe leaves a
-                # recoverable :initializing entry for the next tick (D4).
-                state = {
-                  name: name, instance_key: instance_key, instance_cfg: instance_cfg,
-                  callable: callable, probe_coordinator: probe_coordinator,
-                  publisher_token: publisher_token, sequence: 0, offerings: []
-                }
-                instance_states[name] = state
-
                 offerings = fetch_offerings(instance_cfg: instance_cfg, instance_key: instance_key)
-                perform_readiness(instance_id: name, state: state, offerings: offerings)
+                state = {
+                  name: instance_id, instance_key: instance_key, instance_cfg: instance_cfg,
+                  callable: callable, probe_coordinator: probe_coordinator,
+                  publisher_token: publisher_token, sequence: 0, offerings: offerings
+                }
+                Legion::Extensions::Llm::Inventory::WeightReconciler.track_initializing!(
+                  states: instance_states,
+                  state_key: instance_id,
+                  state: state,
+                  mutex: state_mutex
+                )
+                perform_readiness(instance_id: instance_id, state: state, offerings: offerings)
               end
 
               # Run a readiness probe and commit the outcome. While the instance
@@ -62,7 +64,9 @@ module Legion
               # once activated it reports success/failure against the
               # availability fact.
               def perform_readiness(instance_id:, state:, offerings:)
-                state[:offerings] = offerings
+                reconcile_weight_snapshot(
+                  instance_id: instance_id, state: state, discovered_offerings: offerings
+                )
                 probe_token = publisher.readiness_probe_started(
                   instance_id: instance_id, publisher_token: state[:publisher_token]
                 )
@@ -75,23 +79,43 @@ module Legion
               end
 
               def report_probe_result(instance_id:, state:, probe_token:, readiness:)
-                status = publisher.snapshot.publication_status(instance_key: state[:instance_key])
-                if readiness.ready? && status.state == :initializing
-                  publisher.activate_instance_snapshot(
-                    instance_id: instance_id, publisher_token: state[:publisher_token],
-                    offerings: state[:offerings], sequence: state[:sequence], probe_token: probe_token
-                  )
-                elsif readiness.ready?
-                  publisher.readiness_succeeded(instance_id: instance_id, probe_token: probe_token)
-                else
-                  publisher.readiness_failed(
-                    instance_id: instance_id, probe_token: probe_token, reason: readiness.reason
-                  )
-                end
-                write_instance_health(state)
+                committed = if readiness.ready? && tracked_unpublished?(instance_id: instance_id, state: state)
+                              activate_tracked_state(
+                                instance_id: instance_id, state: state, probe_token: probe_token
+                              )
+                            else
+                              report_tracked_readiness(
+                                instance_id: instance_id, state: state,
+                                probe_token: probe_token, readiness: readiness
+                              )
+                            end
+                write_instance_health(state) if committed
+                committed
               rescue StandardError => e
                 handle_exception(e, level: :warn, operation: 'vllm.runner.discovery.report_probe',
                                     instance_id: instance_id)
+                false
+              end
+
+              def tracked_unpublished?(instance_id:, state:)
+                state_mutex.synchronize do
+                  instance_states[instance_id].equal?(state) && !state.fetch(:published)
+                end
+              end
+
+              def report_tracked_readiness(instance_id:, state:, probe_token:, readiness:)
+                state_mutex.synchronize do
+                  return false unless instance_states[instance_id].equal?(state)
+
+                  if readiness.ready?
+                    publisher.readiness_succeeded(instance_id: instance_id, probe_token: probe_token)
+                  else
+                    publisher.readiness_failed(
+                      instance_id: instance_id, probe_token: probe_token, reason: readiness.reason
+                    )
+                  end
+                  true
+                end
               end
             end
           end

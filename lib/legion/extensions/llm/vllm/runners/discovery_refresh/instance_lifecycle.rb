@@ -31,28 +31,36 @@ module Legion
               # names pointing at the same endpoint remain distinct instances.
               def reconcile_instances
                 configured = Vllm.discover_instances
+                configured_ids = configured.keys.map(&:to_s)
 
-                instance_states.each_key do |instance_id|
-                  next if configured.key?(instance_id)
+                tracked_ids = state_mutex.synchronize { instance_states.keys }
+                tracked_ids.each do |instance_id|
+                  next if configured_ids.include?(instance_id)
 
                   remove_instance_state(instance_id)
                 end
 
                 configured.each do |name, instance_cfg|
-                  update_instance(name: name, instance_cfg: instance_cfg)
+                  update_instance(name: name.to_s, instance_cfg: instance_cfg)
                 rescue StandardError => e
                   handle_exception(e, level: :warn, operation: 'vllm.runner.discovery.instance',
                                       instance_name: name.to_s)
                 end
+                observe_dormant_weights
               end
 
               def remove_all_instances(**)
-                instance_states.each_key { |instance_id| remove_instance_state(instance_id) }
+                tracked_ids = state_mutex.synchronize { instance_states.keys }
+                tracked_ids.each { |instance_id| remove_instance_state(instance_id) }
+                state_mutex.synchronize do
+                  instance_states.clear
+                  dormant_weight_tracker.clear!
+                end
                 { success: true }
               end
 
               def update_instance(name:, instance_cfg:)
-                state = instance_states[name]
+                state = state_mutex.synchronize { instance_states[name] }
                 if state && physical_id_changed?(state, instance_cfg)
                   # The physical target moved (endpoint or API key changed) —
                   # the captured callable points at the old endpoint, so drop
@@ -71,10 +79,18 @@ module Legion
               end
 
               def remove_instance_state(instance_id)
-                state = instance_states.delete(instance_id)
+                state = state_mutex.synchronize do
+                  tracked = instance_states[instance_id]
+                  next unless tracked
+
+                  publisher.remove_instance(
+                    instance_id: instance_id, publisher_token: tracked[:publisher_token]
+                  )
+                  instance_states.delete(instance_id) if instance_states[instance_id].equal?(tracked)
+                  tracked
+                end
                 return unless state
 
-                publisher.remove_instance(instance_id: instance_id, publisher_token: state[:publisher_token])
                 clear_settings_health(name: state[:name])
               rescue StandardError => e
                 handle_exception(e, level: :warn, operation: 'vllm.runner.discovery.remove_instance',

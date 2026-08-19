@@ -140,4 +140,44 @@ RSpec.describe Legion::Extensions::Llm::Vllm::Helpers::OfferingBuilder do
       end
     end
   end
+
+  describe 'write-time lane weights' do
+    around do |example|
+      root = Legion::Settings.loader.settings
+      original_extensions_llm = root.dig(:extensions, :llm)
+      original_llm = root[:llm]
+      root[:extensions][:llm] = {
+        vllm: {
+          weight: 120,
+          instances: {
+            apollo: { weight: 110, models: { 'gemma-4-31b-it' => { weight: 130 } } }
+          }
+        }
+      }
+      root[:llm] = { routing: { tier_weights: { direct: 140 } } }
+      example.run
+    ensure
+      root[:extensions][:llm] = original_extensions_llm
+      root[:llm] = original_llm
+    end
+
+    it 'stores the exact four components and their product on every draft' do
+      draft = build(tier: :direct)
+
+      expect(draft.weight_inputs).to eq(
+        tier: 140, provider: 120, instance: 110, model_or_offering: 130
+      )
+      expect(draft.base_weight).to eq(240_240_000)
+      expect(draft.base_weight).to eq(draft.weight_inputs.values.reduce(1, :*))
+    end
+
+    it 'preserves an explicit zero and rejects false instead of defaulting either value' do
+      settings = Legion::Settings[:extensions][:llm][:vllm]
+      settings[:weight] = 0
+      expect(build(tier: :direct).weight_inputs[:provider]).to eq(0)
+
+      settings[:weight] = false
+      expect { build(tier: :direct) }.to raise_error(ArgumentError, /Integer >= 0/)
+    end
+  end
 end

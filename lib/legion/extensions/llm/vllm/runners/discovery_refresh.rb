@@ -7,6 +7,8 @@ require 'legion/logging'
 require 'legion/extensions/llm/vllm'
 require 'legion/extensions/llm/inventory/records'
 
+require 'legion/extensions/llm/vllm/runners/discovery_refresh/offering_comparison'
+require 'legion/extensions/llm/vllm/runners/discovery_refresh/weight_publication'
 require 'legion/extensions/llm/vllm/runners/discovery_refresh/instance_lifecycle'
 require 'legion/extensions/llm/vllm/runners/discovery_refresh/claim_activation'
 require 'legion/extensions/llm/vllm/runners/discovery_refresh/probing'
@@ -45,6 +47,8 @@ module Legion
           #   Http              — model/health HTTP, instance identity
           module DiscoveryRefresh
             include Legion::Extensions::Helpers::Lex
+            include OfferingComparison
+            include WeightPublication
             include InstanceLifecycle
             include ClaimActivation
             include Probing
@@ -60,7 +64,10 @@ module Legion
             end
 
             def self.reset_instance_states!
-              @instance_states.clear
+              state_mutex.synchronize do
+                @instance_states.clear
+                dormant_weight_tracker.clear!
+              end
             end
           end
         end

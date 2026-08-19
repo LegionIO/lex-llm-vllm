@@ -1276,6 +1276,33 @@ RSpec.describe Legion::Extensions::Llm::Vllm do
       # The callable truncates to 512, then ProviderOutcome may further validate
       expect(outcome.reason.length).to be <= 1024
     end
+
+    it 'renders the dispatch-folded system prompt as the leading wire message (D14)' do
+      captured = nil
+      connection = instance_double(Legion::Extensions::Llm::Connection)
+      allow(connection).to receive(:post) do |path, payload|
+        captured = { path: path, payload: payload }
+        completion_response
+      end
+      provider = Legion::Extensions::Llm::Vllm::Provider.new(ssot_harness.instance_configs[0])
+      provider.instance_variable_set(:@connection, connection)
+      callable.instance_variable_set(:@provider, provider)
+      messages = [
+        Legion::Extensions::Llm::Canonical::Message.build(
+          role: :system, content: 'system from dispatch fold'
+        ),
+        Legion::Extensions::Llm::Canonical::Message.build(role: :user, content: 'hello')
+      ]
+
+      callable.chat(
+        messages: messages, model: 'meta-llama/Llama-3.1-8B-Instruct'
+      )
+
+      expect(captured[:path]).to eq('/v1/chat/completions')
+      expect(captured.dig(:payload, :messages).first).to eq(
+        role: 'system', content: 'system from dispatch fold'
+      )
+    end
   end
 
   # ─── OfferingDraft validation ──────────────────────────────────────────────
