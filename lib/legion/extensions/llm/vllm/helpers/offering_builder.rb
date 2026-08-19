@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 require 'legion/extensions/llm/inventory/evidence'
+require 'legion/extensions/llm/inventory/weight_reconciler'
 
 module Legion
   module Extensions
@@ -20,6 +21,13 @@ module Legion
               tier = @instance_cfg[:tier] || :direct
               embed_sup = embedding_supported?(model_data)
               max_output = model_data[:max_output_tokens] || model_data[:max_completion_tokens]
+              weight_inputs = Legion::Extensions::Llm::Inventory::WeightSchema.weight_inputs(
+                settings: Legion::Settings,
+                instance_key: instance_key,
+                provider_native_key: model_id,
+                model: model_id,
+                tier: tier
+              )
 
               Legion::Extensions::Llm::Inventory::OfferingDraft.new(
                 provider_native_key: model_id,
@@ -34,7 +42,9 @@ module Legion
                 tokenizer_evidence: build_tokenizer_evidence(model_data[:tokenizer]),
                 quota_domains: {},
                 metadata: build_metadata(model_data),
-                publication_source: :provider_catalog
+                publication_source: :provider_catalog,
+                weight_inputs: weight_inputs,
+                base_weight: Legion::Extensions::Llm::Inventory::WeightSchema.base_weight(weight_inputs)
               )
             end
 

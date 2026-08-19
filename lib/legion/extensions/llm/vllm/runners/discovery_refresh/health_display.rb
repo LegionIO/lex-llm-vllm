@@ -15,7 +15,7 @@ module Legion
                 snapshot = publisher.snapshot
                 display = display_fact(instance_key: instance_key, snapshot: snapshot)
 
-                instance_settings = settings.dig(:instances, state[:name])
+                instance_settings = settings.dig(:instances, state[:name].to_sym)
                 return unless instance_settings.is_a?(Hash)
 
                 instance_settings[:health] = health_hash(display)
@@ -26,7 +26,7 @@ module Legion
               end
 
               def clear_settings_health(name:)
-                instance_settings = settings.dig(:instances, name)
+                instance_settings = settings.dig(:instances, name.to_sym)
                 return unless instance_settings.is_a?(Hash)
 
                 instance_settings.delete(:health)

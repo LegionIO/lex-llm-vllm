@@ -271,6 +271,438 @@ RSpec.describe Legion::Extensions::Llm::Vllm::Runners::DiscoveryRefresh do
     end
   end
 
+  describe 'write-time lane weights on the module-runner cadence' do
+    let(:raw_instances) do
+      { apollo: { vllm_api_base: 'http://apollo:8000', tier: :local } }
+    end
+    let(:model_id) { 'test-model' }
+    let(:models) { [{ id: model_id, max_model_len: 4096 }] }
+
+    def configure_weights(provider: 100, instance: 100, model_weights: {}, tier: 100)
+      tree = settings_tree
+      tree[:weight] = provider
+      tree[:instances][:apollo][:weight] = instance
+      tree[:instances][:apollo][:models] = model_weights.transform_values { |weight| { weight: weight } }
+      Legion::Settings.loader.settings[:llm] = { routing: { tier_weights: { local: tier } } }
+    end
+
+    def build_weighted_draft(id: model_id, max_model_len: 4096, instance_key: key(:apollo), instance_cfg: raw_instances[:apollo])
+      Legion::Extensions::Llm::Vllm::Helpers::OfferingBuilder.new(
+        instance_cfg: instance_cfg, instance_key: instance_key
+      ).build(model_id: id, model_data: { id: id, max_model_len: max_model_len })
+    end
+
+    def replace_calls_for(publisher)
+      calls = []
+      allow(publisher).to receive(:replace_instance_snapshot).and_wrap_original do |method, **kwargs|
+        calls << kwargs
+        method.call(**kwargs)
+      end
+      calls
+    end
+
+    around do |example|
+      root = Legion::Settings.loader.settings
+      original_llm = root[:llm]
+      example.run
+    ensure
+      root[:llm] = original_llm
+    end
+
+    before { configure_weights }
+
+    it 'does not claim malformed startup weights and recovers once on the next valid pass' do
+      settings_tree[:weight] = false
+      publisher = runner.publisher
+      callable_class = Legion::Extensions::Llm::Vllm::VllmCallable
+      allow(publisher).to receive(:claim_instance).and_call_original
+      allow(callable_class).to receive(:new).and_call_original
+
+      runner.refresh
+
+      expect(registry.snapshot.publication_status(instance_key: key(:apollo))).to be_nil
+      expect(registry.snapshot.instance(instance_key: key(:apollo))).to be_nil
+      expect(runner.instance_states).to be_empty
+      expect(publisher).not_to have_received(:claim_instance)
+      expect(callable_class).not_to have_received(:new)
+
+      settings_tree[:weight] = 125
+      runner.refresh
+
+      expect(publisher).to have_received(:claim_instance).once
+      expect(callable_class).to have_received(:new).once
+      expect(registry.snapshot.publication_status(instance_key: key(:apollo)).state).to eq(:complete)
+      expect(registry.snapshot.instance(instance_key: key(:apollo)).availability.state).to eq(:available)
+      expect(runner.instance_states.keys).to eq(['apollo'])
+    end
+
+    it 'publishes one frozen replacement for a weight-only change on the next ordinary pass' do
+      publisher = runner.publisher
+      replacements = replace_calls_for(publisher)
+      fetches = 0
+      probes = 0
+      display_writes = 0
+      allow(runner).to receive(:fetch_models) do
+        fetches += 1
+        models
+      end
+      allow(runner).to receive(:check_health) do
+        probes += 1
+        ready_result
+      end
+      allow(runner).to receive(:write_instance_health).and_wrap_original do |method, state|
+        display_writes += 1
+        method.call(state)
+      end
+
+      runner.refresh
+      settings_tree[:weight] = 125
+      runner.refresh
+
+      expect(replacements.length).to eq(1)
+      expect(replacements.first[:offerings]).to be_frozen
+      expect(replacements.first[:offerings].first.weight_inputs[:provider]).to eq(125)
+      expect(fetches).to eq(2)
+      expect(probes).to eq(2)
+      expect(display_writes).to eq(3)
+    end
+
+    it 'publishes nothing when a settings change leaves the pair unchanged' do
+      publisher = runner.publisher
+      replacements = replace_calls_for(publisher)
+      runner.refresh
+      state = runner.instance_states.fetch('apollo')
+      sequence = state.fetch(:sequence)
+
+      settings_tree[:unrelated_setting] = 'changed'
+      runner.refresh
+
+      expect(replacements).to be_empty
+      expect(state.fetch(:sequence)).to eq(sequence)
+    end
+
+    it 'treats only evidence observation timestamps as volatile' do
+      first = build_weighted_draft
+      second = build_weighted_draft
+
+      expect(first).not_to eq(second)
+      expect(runner.send(:offerings_equivalent?, [first], [second])).to be(true)
+    end
+
+    it 'ignores equivalent catalog reordering without replacing or advancing the sequence' do
+      publisher = runner.publisher
+      replacements = replace_calls_for(publisher)
+      model_a = { id: 'model-a', max_model_len: 4096 }
+      model_b = { id: 'model-b', max_model_len: 8192 }
+      allow(runner).to receive(:fetch_models).and_return([model_a, model_b], [model_b, model_a])
+
+      runner.refresh
+      state = runner.instance_states.fetch('apollo')
+      sequence = state.fetch(:sequence)
+      runner.refresh
+
+      expect(replacements).to be_empty
+      expect(state.fetch(:sequence)).to eq(sequence)
+      expect(registry.snapshot.publication_status(instance_key: key(:apollo)).published_sequence).to eq(sequence)
+    end
+
+    it 'treats duplicate-count changes as significant without mutating cache on validation failure' do
+      runner.refresh
+      state = runner.instance_states.fetch('apollo')
+      original = state.fetch(:offerings)
+      duplicate = [original.first, original.first]
+      snapshot = registry.snapshot
+      published = snapshot.offerings_for(instance_key: key(:apollo))
+      generation = snapshot.generation
+      publisher = runner.publisher
+      replacements = replace_calls_for(publisher)
+      allow(runner).to receive(:fetch_offerings).and_return(duplicate)
+
+      expect do
+        runner.send(
+          :replace_if_changed, instance_id: 'apollo', state: state,
+                               instance_cfg: raw_instances[:apollo]
+        )
+      end.to raise_error(
+        Legion::Extensions::Llm::Inventory::Errors::ValidationError,
+        'duplicate provider_native_key'
+      )
+      expect(replacements.length).to eq(1)
+      expect(state.values_at(:sequence, :offerings)).to eq([0, original])
+      expect(registry.snapshot.offerings_for(instance_key: key(:apollo))).to eq(published)
+      expect(registry.snapshot.generation).to eq(generation)
+      expect(registry.snapshot.publication_status(instance_key: key(:apollo)).published_sequence).to eq(0)
+    end
+
+    it 'publishes when evidence content changes' do
+      publisher = runner.publisher
+      replacements = replace_calls_for(publisher)
+      runner.refresh
+      allow(runner).to receive(:fetch_models).and_return([{ id: model_id, max_model_len: 8192 }])
+
+      runner.refresh
+
+      expect(replacements.length).to eq(1)
+      expect(replacements.first[:offerings].first.context_evidence.value).to eq(8192)
+    end
+
+    it 'logs the dormant cycle once per disappearance on ordinary passes' do
+      ghost_cfg = { vllm_api_base: 'http://ghost:8000', tier: :local, weight: 123 }
+      configure_vllm_settings(ghost: ghost_cfg)
+      Legion::Settings.loader.settings[:llm] = { routing: { tier_weights: { local: 100 } } }
+      allow(Legion::Extensions::Llm::Vllm).to receive_messages(settings: settings_tree, discover_instances: { ghost: ghost_cfg })
+      allow(runner).to receive(:update_instance)
+      logger = instance_double(Logger, info: nil)
+      allow(runner).to receive(:log).and_return(logger)
+
+      runner.refresh
+      runner.refresh
+      ghost_key = Legion::Extensions::Llm::Inventory::Identity::InstanceKey.new(
+        provider_family: :vllm, instance_id: 'ghost'
+      )
+      draft = build_weighted_draft(
+        instance_key: ghost_key, instance_cfg: ghost_cfg
+      )
+      runner.send(:state_mutex).synchronize do
+        runner.instance_states['ghost'] = {
+          published: true, instance_key: ghost_key, offerings: [draft]
+        }
+      end
+      runner.refresh
+      runner.send(:state_mutex).synchronize { runner.instance_states.delete('ghost') }
+      runner.refresh
+
+      text = '[llm][vllm] action=dormant_weight ' \
+             'weight_key=[:vllm, :instance, "ghost"] no_lane_published=true'
+      expect(logger).to have_received(:info).with(text).twice
+    end
+
+    it 'keeps sequence stable through ten unchanged ordinary passes' do
+      publisher = runner.publisher
+      replacements = replace_calls_for(publisher)
+      runner.refresh
+      state = runner.instance_states.fetch('apollo')
+
+      10.times { runner.refresh }
+
+      expect(replacements).to be_empty
+      expect(state.fetch(:sequence)).to eq(0)
+    end
+
+    it 'has no Settings lifecycle path and clears repository-local tracking on shutdown' do
+      %i[on_reload reload! reset!].each do |method_name|
+        allow(Legion::Settings).to receive(method_name).and_call_original
+      end
+      key_value = [:vllm, :instance, 'ghost']
+      tracker = runner.send(:dormant_weight_tracker)
+      expect(tracker.observe(configured_keys: [key_value], published_keys: [])).to eq([key_value])
+
+      runner.refresh
+      runner.remove_all_instances
+
+      %i[on_reload reload! reset!].each do |method_name|
+        expect(Legion::Settings).not_to have_received(method_name)
+      end
+      expect(tracker.observe(configured_keys: [key_value], published_keys: [])).to eq([key_value])
+    end
+
+    it 'serializes interleaved ordinary passes with monotonic unique publications' do
+      configure_weights(model_weights: { 'model-a' => 101, 'model-b' => 102 })
+      runner.refresh
+      state = runner.instance_states.fetch('apollo')
+      arrived = Queue.new
+      release = Queue.new
+      publications = []
+      publication_mutex = Mutex.new
+      publisher = runner.publisher
+      allow(publisher).to receive(:replace_instance_snapshot).and_wrap_original do |method, **kwargs|
+        publication_mutex.synchronize { publications << kwargs }
+        method.call(**kwargs)
+      end
+      allow(runner).to receive(:fetch_offerings) do |instance_cfg:, instance_key:|
+        arrived << true
+        release.pop
+        [build_weighted_draft(
+          id: Thread.current[:model_id], instance_key: instance_key, instance_cfg: instance_cfg
+        )]
+      end
+
+      threads = %w[model-a model-b].map do |id|
+        Thread.new do
+          Thread.current[:model_id] = id
+          runner.send(
+            :replace_if_changed, instance_id: 'apollo', state: state,
+                                 instance_cfg: raw_instances[:apollo]
+          )
+        end
+      end
+      2.times { arrived.pop }
+      2.times { release << true }
+      threads.each(&:value)
+
+      expect(publications.map { |entry| entry[:sequence] }).to eq([1, 2])
+      expect(publications.map { |entry| entry[:offerings].first.base_weight }.uniq.length).to eq(2)
+      expect(state.fetch(:offerings)).to eq(publications.last.fetch(:offerings))
+      expect(state.fetch(:sequence)).to eq(2)
+    end
+
+    it 'leaves the cache unchanged on replace failure and retries on the next pass' do
+      runner.refresh
+      state = runner.instance_states.fetch('apollo')
+      original = state.fetch(:offerings)
+      allow(runner).to receive(:fetch_offerings).and_return(
+        [build_weighted_draft(max_model_len: 8192)]
+      )
+      publisher = runner.publisher
+      allow(publisher).to receive(:replace_instance_snapshot).and_raise('publish failed')
+
+      expect do
+        runner.send(
+          :replace_if_changed, instance_id: 'apollo', state: state,
+                               instance_cfg: raw_instances[:apollo]
+        )
+      end.to raise_error(RuntimeError, 'publish failed')
+      expect(state.values_at(:sequence, :offerings)).to eq([0, original])
+
+      allow(publisher).to receive(:replace_instance_snapshot).and_call_original
+      runner.send(
+        :replace_if_changed, instance_id: 'apollo', state: state,
+                             instance_cfg: raw_instances[:apollo]
+      )
+      expect(state.fetch(:sequence)).to eq(1)
+      expect(state.fetch(:offerings).first.context_evidence.value).to eq(8192)
+    end
+
+    it 'lets removal win while ordinary discovery is in flight' do
+      runner.refresh
+      state = runner.instance_states.fetch('apollo')
+      publisher = runner.publisher
+      allow(publisher).to receive(:replace_instance_snapshot).and_call_original
+      arrived = Queue.new
+      release = Queue.new
+      allow(runner).to receive(:fetch_offerings) do
+        arrived << true
+        release.pop
+        [build_weighted_draft(max_model_len: 8192)]
+      end
+
+      refresh = Thread.new do
+        runner.send(
+          :replace_if_changed, instance_id: 'apollo', state: state,
+                               instance_cfg: raw_instances[:apollo]
+        )
+      end
+      arrived.pop
+      runner.send(:remove_instance_state, 'apollo')
+      release << true
+
+      expect { refresh.value }.not_to raise_error
+      expect(publisher).not_to have_received(:replace_instance_snapshot)
+      expect(runner.instance_states.key?('apollo')).to be(false)
+    end
+
+    it 'rebuilds current settings after draft construction but before initial activation' do
+      entered = Queue.new
+      release = Queue.new
+      allow(runner).to receive(:check_health) do
+        entered << true
+        release.pop
+        ready_result
+      end
+
+      activation = Thread.new do
+        runner.claim_and_activate_instance(
+          name: 'apollo', instance_cfg: raw_instances[:apollo]
+        )
+      end
+      entered.pop
+      settings_tree[:weight] = 175
+      release << true
+      activation.value
+
+      offering = registry.snapshot.offerings_for(instance_key: key(:apollo)).first
+      state = runner.instance_states.fetch('apollo')
+      expect(offering.weight_inputs[:provider]).to eq(175)
+      expect(state.fetch(:offerings).first.weight_inputs[:provider]).to eq(175)
+    end
+
+    it 'updates an unpublished cache without replacement or activation and keeps it dormant' do
+      logger = Logger.new(File::NULL)
+      allow(logger).to receive(:info).and_call_original
+      allow(runner).to receive_messages(check_health: not_ready_result, log: logger)
+      publisher = runner.publisher
+      allow(publisher).to receive(:replace_instance_snapshot).and_call_original
+      allow(publisher).to receive(:activate_instance_snapshot).and_call_original
+
+      runner.refresh
+      settings_tree[:weight] = 175
+      runner.refresh
+      state = runner.instance_states.fetch('apollo')
+
+      expect(state.fetch(:published)).to be(false)
+      expect(state.fetch(:offerings).first.weight_inputs[:provider]).to eq(175)
+      expect(publisher).not_to have_received(:replace_instance_snapshot)
+      expect(publisher).not_to have_received(:activate_instance_snapshot)
+      expect(logger).to have_received(:info).with(
+        '[llm][vllm] action=dormant_weight ' \
+        'weight_key=[:vllm, :provider] no_lane_published=true'
+      ).once
+    end
+
+    it 'does not resurrect a tracked state removed while readiness is in flight' do
+      entered = Queue.new
+      release = Queue.new
+      allow(runner).to receive(:check_health) do
+        entered << true
+        release.pop
+        ready_result
+      end
+      publisher = runner.publisher
+      allow(publisher).to receive(:activate_instance_snapshot).and_call_original
+      allow(runner).to receive(:write_instance_health).and_call_original
+
+      activation = Thread.new do
+        runner.claim_and_activate_instance(
+          name: 'apollo', instance_cfg: raw_instances[:apollo]
+        )
+      end
+      entered.pop
+      runner.send(:remove_instance_state, 'apollo')
+      release << true
+      activation.value
+
+      expect(runner.instance_states.key?('apollo')).to be(false)
+      expect(registry.snapshot.publication_status(instance_key: key(:apollo))).to be_nil
+      expect(publisher).not_to have_received(:activate_instance_snapshot)
+      expect(runner).not_to have_received(:write_instance_health)
+    end
+
+    it 'leaves unpublished state unchanged when activation raises and permits retry' do
+      publisher = runner.publisher
+      attempts = 0
+      allow(publisher).to receive(:activate_instance_snapshot).and_wrap_original do |method, **kwargs|
+        attempts += 1
+        raise 'activation failed' if attempts == 1
+
+        method.call(**kwargs)
+      end
+
+      runner.refresh
+      state = runner.instance_states.fetch('apollo')
+      cached = state.fetch(:offerings)
+      expect(state.values_at(:sequence, :offerings, :published)).to eq([0, cached, false])
+
+      runner.send(
+        :perform_readiness, instance_id: 'apollo', state: state,
+                            offerings: runner.fetch_offerings(
+                              instance_cfg: raw_instances[:apollo], instance_key: key(:apollo)
+                            )
+      )
+      expect(state.fetch(:published)).to be(true)
+      expect(state.fetch(:sequence)).to eq(0)
+    end
+  end
+
   describe 'shutdown' do
     it 'removes all instances from the registry and clears state + display health' do
       runner.refresh

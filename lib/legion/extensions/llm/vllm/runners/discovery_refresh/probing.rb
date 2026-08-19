@@ -10,7 +10,7 @@ module Legion
             # discovery runner. Mixed into DiscoveryRefresh.
             module Probing
               def refresh_instance(instance_id:, instance_cfg:)
-                state = instance_states[instance_id]
+                state = state_mutex.synchronize { instance_states[instance_id] }
                 return unless state
 
                 status = publisher.snapshot.publication_status(instance_key: state[:instance_key])
@@ -29,15 +29,10 @@ module Legion
 
               def replace_if_changed(instance_id:, state:, instance_cfg:)
                 new_offerings = fetch_offerings(instance_cfg: instance_cfg, instance_key: state[:instance_key])
-                return if new_offerings == state[:offerings]
-
-                state[:sequence] += 1
-                publisher.replace_instance_snapshot(
-                  instance_id: instance_id, publisher_token: state[:publisher_token],
-                  offerings: new_offerings, sequence: state[:sequence]
+                changed = reconcile_weight_snapshot(
+                  instance_id: instance_id, state: state, discovered_offerings: new_offerings
                 )
-                state[:offerings] = new_offerings
-                write_instance_health(state)
+                write_instance_health(state) if changed
               end
 
               def run_cadence_probe(instance_id:, state:)
@@ -58,7 +53,7 @@ module Legion
               end
 
               def handle_reactive_probe(instance_id:, request:)
-                state = instance_states[instance_id]
+                state = state_mutex.synchronize { instance_states[instance_id] }
                 return unless state
 
                 coordinator = state[:probe_coordinator]

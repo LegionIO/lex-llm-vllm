@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.4.6] - 2026-08-19
+
+### Changed
+- Publish the immutable four-component lane-weight pair from vLLM discovery and reconcile weight-only changes on the existing module-runner cadence.
+- Serialize initial, recovery, replacement, removal, shutdown, and probe publication transitions behind one module-level mutex without adding a Settings callback or operator workflow.
+- Track configured-but-unpublished weight keys on the ordinary discovery pass and log each dormant transition once.
+- Raise the `lex-llm` dependency floor to 0.7.6; the existing `legion-settings` dependency remains unchanged.
+
+### Fixed
+- Compare the offering catalog as a duplicate-preserving multiset of complete contracts while excluding only non-authoritative evidence observation timestamps, preventing both reorder-only churn and accidental duplicate suppression while retaining real evidence and weight changes.
+- Complete startup discovery and weight validation before constructing a callable or claiming inventory, so malformed settings leave no orphaned initializing scope and the next valid cadence pass recovers without operator action.
+- Use a real in-memory IO sink for the test logger so Ruby 4 cannot fall back to stdout during the file-only RSpec release gate.
+
+### Added
+- Cover the complete writer lifecycle, publication races, failure atomicity, dormant-state cycle, and the actual callable's folded-system OpenAI-compatible wire payload.
+
 ## [0.4.5] - 2026-08-18
 
 ### Fixed

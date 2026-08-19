@@ -2,6 +2,7 @@
 
 require 'bundler/setup'
 require 'logger'
+require 'stringio'
 
 require 'legion/extensions/llm'
 
@@ -46,7 +47,10 @@ if Gem.loaded_specs['lex-llm']
 end
 
 if defined?(Legion::Logging)
-  null_logger = Logger.new(File::NULL)
+  # Ruby 4 treats File::NULL passed as a String as a logger with no logdev;
+  # legion-logging then deliberately falls back to stdout. Keep a real IO
+  # sink so the required JSON-to-file RSpec run remains zero-stdout.
+  null_logger = Logger.new(StringIO.new)
   null_logger.level = Logger::DEBUG
   Legion::Logging.instance_variable_set(:@log, null_logger)
   Legion::Logging.instance_variable_set(
