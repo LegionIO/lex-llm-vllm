@@ -36,6 +36,7 @@ module Legion
                   provider_family: :vllm, instance_id: instance_id,
                   physical_id: derive_physical_id(instance_cfg: instance_cfg)
                 )
+                offerings = fetch_offerings(instance_cfg: instance_cfg, instance_key: instance_key)
                 callable = Legion::Extensions::Llm::Vllm::VllmCallable.new(instance_cfg: instance_cfg, logger: log)
                 probe_coordinator = Legion::Extensions::Llm::Inventory::ProbeCoordinator.new(
                   instance_key: instance_key, enqueue: build_probe_enqueue(instance_id: instance_id)
@@ -44,7 +45,6 @@ module Legion
                   instance_id: instance_id, physical_id: instance_key.physical_id,
                   callable: callable, probe_request_handle: probe_coordinator
                 )
-                offerings = fetch_offerings(instance_cfg: instance_cfg, instance_key: instance_key)
                 state = {
                   name: instance_id, instance_key: instance_key, instance_cfg: instance_cfg,
                   callable: callable, probe_coordinator: probe_coordinator,

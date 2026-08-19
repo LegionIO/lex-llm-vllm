@@ -311,6 +311,31 @@ RSpec.describe Legion::Extensions::Llm::Vllm::Runners::DiscoveryRefresh do
 
     before { configure_weights }
 
+    it 'does not claim malformed startup weights and recovers once on the next valid pass' do
+      settings_tree[:weight] = false
+      publisher = runner.publisher
+      callable_class = Legion::Extensions::Llm::Vllm::VllmCallable
+      allow(publisher).to receive(:claim_instance).and_call_original
+      allow(callable_class).to receive(:new).and_call_original
+
+      runner.refresh
+
+      expect(registry.snapshot.publication_status(instance_key: key(:apollo))).to be_nil
+      expect(registry.snapshot.instance(instance_key: key(:apollo))).to be_nil
+      expect(runner.instance_states).to be_empty
+      expect(publisher).not_to have_received(:claim_instance)
+      expect(callable_class).not_to have_received(:new)
+
+      settings_tree[:weight] = 125
+      runner.refresh
+
+      expect(publisher).to have_received(:claim_instance).once
+      expect(callable_class).to have_received(:new).once
+      expect(registry.snapshot.publication_status(instance_key: key(:apollo)).state).to eq(:complete)
+      expect(registry.snapshot.instance(instance_key: key(:apollo)).availability.state).to eq(:available)
+      expect(runner.instance_states.keys).to eq(['apollo'])
+    end
+
     it 'publishes one frozen replacement for a weight-only change on the next ordinary pass' do
       publisher = runner.publisher
       replacements = replace_calls_for(publisher)
