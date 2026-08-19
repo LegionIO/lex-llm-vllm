@@ -11,6 +11,7 @@
 ### Fixed
 - Compare every offering contract field while excluding only non-authoritative evidence observation timestamps, preventing unchanged catalog passes from republishing snapshots while retaining real evidence and weight changes.
 - Complete startup discovery and weight validation before constructing a callable or claiming inventory, so malformed settings leave no orphaned initializing scope and the next valid cadence pass recovers without operator action.
+- Use a real in-memory IO sink for the test logger so Ruby 4 cannot fall back to stdout during the file-only RSpec release gate.
 
 ### Added
 - Cover the complete writer lifecycle, publication races, failure atomicity, dormant-state cycle, and the actual callable's folded-system OpenAI-compatible wire payload.
