@@ -57,14 +57,14 @@ module Legion
             # bypass class — reject loudly, never coerce.
             provider.enforce_canonical_messages!(messages)
             named, params = split_fleet_kwargs(rest, COMPLETION_NAMED_KEYS)
-            provider.chat(messages, model: model, params: params, **named)
+            provider.chat(messages, model: model, params: canonical_params(params), **named)
           end
 
           def stream_chat(messages, model:, **rest, &)
             record_inference
             provider.enforce_canonical_messages!(messages)
             named, params = split_fleet_kwargs(rest, COMPLETION_NAMED_KEYS)
-            provider.stream_chat(messages, model: model, params: params, **named, &)
+            provider.stream_chat(messages, model: model, params: canonical_params(params), **named, &)
           end
 
           def embed(text:, model:, **rest)
@@ -96,6 +96,14 @@ module Legion
 
           def provider
             @provider ||= Legion::Extensions::Llm::Vllm::Provider.new(@instance_cfg)
+          end
+
+          # The 0.8.0 completion funnel receives canonical values only
+          # (08 F3): the folded wire params become a Canonical::Params at
+          # the dispatch boundary — temperature is a params member (05 O4),
+          # never a kwarg.
+          def canonical_params(params)
+            Legion::Extensions::Llm::Canonical::Params.from_hash(params)
           end
 
           # Split the fleet's **rest into the base Provider's named kwargs and a
