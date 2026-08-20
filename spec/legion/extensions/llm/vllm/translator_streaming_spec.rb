@@ -37,8 +37,11 @@ RSpec.describe Legion::Extensions::Llm::Vllm::Translator do
 
       chunk = translator.parse_chunk(data)
       expect(chunk.type).to eq(:tool_call_delta)
-      expect(chunk.tool_call.id).to eq('call_1')
-      expect(chunk.tool_call.name).to eq('weather')
+      # The tool_call member is the delta fragment (Hash) — the documented
+      # 0.8.0 Chunk shape; a full Canonical::ToolCall is wrong here.
+      expect(chunk.tool_call).to be_a(Hash)
+      expect(chunk.tool_call[:id]).to eq('call_1')
+      expect(chunk.tool_call[:name]).to eq('weather')
     end
 
     it 'keeps continuation fragments with nil id and raw partial arguments' do
@@ -48,8 +51,8 @@ RSpec.describe Legion::Extensions::Llm::Vllm::Translator do
 
       chunk = translator.parse_chunk(data)
       expect(chunk.type).to eq(:tool_call_delta)
-      expect(chunk.tool_call.id).to be_nil
-      expect(chunk.tool_call.arguments).to eq('{"city":"Min')
+      expect(chunk.tool_call[:id]).to be_nil
+      expect(chunk.tool_call[:arguments]).to eq('{"city":"Min')
     end
 
     it 'returns an array of chunks when multiple tool_calls are batched in one delta' do
@@ -59,10 +62,10 @@ RSpec.describe Legion::Extensions::Llm::Vllm::Translator do
       ] }, 'finish_reason' => nil }] }
       result = translator.parse_chunk(data)
       expect(result).to be_an(Array).and have_attributes(size: 2)
-      expect(result[0].tool_call.id).to eq('call_1')
-      expect(result[0].tool_call.name).to eq('weather')
-      expect(result[1].tool_call.id).to eq('call_2')
-      expect(result[1].tool_call.name).to eq('time')
+      expect(result[0].tool_call[:id]).to eq('call_1')
+      expect(result[0].tool_call[:name]).to eq('weather')
+      expect(result[1].tool_call[:id]).to eq('call_2')
+      expect(result[1].tool_call[:name]).to eq('time')
     end
   end
 
@@ -81,12 +84,13 @@ RSpec.describe Legion::Extensions::Llm::Vllm::Translator do
 
       accumulator = Legion::Extensions::Llm::StreamAccumulator.new
       result.each { |chunk| accumulator.add(chunk) }
-      message = accumulator.to_message(nil)
+      response = accumulator.to_response(model: nil)
 
-      expect(message.tool_calls.keys).to contain_exactly('call_a', 'call_b')
-      expect(message.tool_calls['call_a'].name).to eq('search')
-      expect(message.tool_calls['call_b'].name).to eq('fetch')
-      expect(message.stop_reason).to eq(:tool_use)
+      expect(response).to be_a(Legion::Extensions::Llm::Canonical::Response)
+      expect(response.tool_calls.map(&:id)).to contain_exactly('call_a', 'call_b')
+      expect(response.tool_calls.find { |tc| tc.id == 'call_a' }.name).to eq('search')
+      expect(response.tool_calls.find { |tc| tc.id == 'call_b' }.name).to eq('fetch')
+      expect(response.stop_reason).to eq(:tool_use)
     end
   end
 end

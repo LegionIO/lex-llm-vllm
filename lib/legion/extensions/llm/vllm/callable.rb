@@ -18,8 +18,9 @@ module Legion
         class VllmCallable
           # Keys the base Provider exposes as named kwargs for the completion
           # operations. Anything else the fleet passes is folded into the
-          # payload `params` hash.
-          COMPLETION_NAMED_KEYS = %i[tools temperature schema thinking tool_prefs headers].freeze
+          # payload `params` hash (temperature is a Canonical::Params member,
+          # never a named kwarg — 05 O4).
+          COMPLETION_NAMED_KEYS = %i[tools schema thinking tool_prefs headers].freeze
           EMBED_NAMED_KEYS = %i[dimensions headers].freeze
 
           def initialize(instance_cfg:, logger:)
@@ -45,21 +46,25 @@ module Legion
 
           # ── Fleet dispatch operations ──────────────────────────────────────
 
-          def chat(messages:, model:, **rest)
+          # 0.8.0 callable contract: chat/stream_chat take the canonical
+          # messages positionally (the fleet dispatch and the conformance kit
+          # both call `callable.chat(messages, model:, ...)`); count_tokens
+          # and embed keep their keyword forms.
+          def chat(messages, model:, **rest)
             record_inference
             # Canonical boundary (N x N law): pipeline dispatch delivers
             # Canonical::Message objects only. Hash/legacy shapes are the
             # bypass class — reject loudly, never coerce.
             provider.enforce_canonical_messages!(messages)
             named, params = split_fleet_kwargs(rest, COMPLETION_NAMED_KEYS)
-            provider.chat(messages: messages, model: model, params: params, **named)
+            provider.chat(messages, model: model, params: params, **named)
           end
 
-          def stream_chat(messages:, model:, **rest, &)
+          def stream_chat(messages, model:, **rest, &)
             record_inference
             provider.enforce_canonical_messages!(messages)
             named, params = split_fleet_kwargs(rest, COMPLETION_NAMED_KEYS)
-            provider.stream_chat(messages: messages, model: model, params: params, **named, &)
+            provider.stream_chat(messages, model: model, params: params, **named, &)
           end
 
           def embed(text:, model:, **rest)

@@ -1,15 +1,26 @@
 # Changelog
 
-## [0.4.7] - 2026-08-19
+## [0.4.7] - 2026-08-20
 
 ### Changed
-- Enforce the canonical dispatch boundary end to end: the fleet callable's chat, stream_chat, and count_tokens operations, and the provider's render seam, now reject plain-Hash messages with a loud ArgumentError instead of silently re-canonicalizing them. The lenient hash re-canonicalization masked the 2026-08-19 hash-bypass defect for 25 failed openai dispatches; it is removed.
-- Prompt-cache `cache_control` now rides as a first-class `Canonical::Message` member (lex-llm 0.7.7) instead of a transport-only hash key; the vLLM OpenAI-compatible wire render continues to drop it, so the wire format is unchanged.
-- Raise the `lex-llm` dependency floor to 0.7.7 for `Provider#enforce_canonical_messages!` and the `cache_control` canonical member.
-- Add a local-tree `lex-llm` path dependency to the test group so the adjacent checkout resolves against unreleased 0.7.7 during development.
+- **lex-llm 0.8.0 conformance (SSOT v4 contract cut).** Migrate the provider, callable, and translator to the Canonical-only boundary:
+  - The provider render/parse boundaries render FROM canonical values and parse TO canonical types (`Canonical::Response` for sync, `Canonical::Chunk` for streaming); the `to_legacy_message`/`to_legacy_chunk` bridges and the legacy `Llm::Message`/`Llm::Chunk`/`Llm::ToolCall` reconstruction are deleted.
+  - `temperature` is no longer a render kwarg (05 O4): the funnel's `Canonical::Params` (or Hash) flows into the vLLM dialect translator, and the edge `schema` folds into `params.response_format` at the render boundary.
+  - The callable's `chat`/`stream_chat` adopt the 0.8.0 callable contract (positional canonical messages; temperature travels inside `params`).
+  - Streaming tool-call deltas emit the documented fragment shape (`{ id:, name:, arguments: <String fragment>, index: }`) instead of a full `Canonical::ToolCall` with a String `arguments` member (O03a: `arguments` is Hash-only, and the accumulator reads the fragment by symbol keys); the sync tool-call path parses through the ONE shared strict arguments parser (`Responses::ToolArguments.parse!`, 10 U2) — the rescue-to-`{}` tolerance is gone (04 L7: invalid JSON is a contract error).
+  - The offerings read path (`discover_offerings`) is served from the SSOT Registry snapshot by the base read path (07 C5); the legacy `offering_from_model` → `Routing::ModelOffering` production path and its filter cache are deleted — the per-gem writer (`Helpers::OfferingBuilder` + `Runners::DiscoveryRefresh`) is the sole publication path.
+- Enforce the canonical dispatch boundary end to end: the fleet callable's chat, stream_chat, and count_tokens operations reject plain-Hash messages with a loud ArgumentError instead of silently re-canonicalizing them. The lenient hash re-canonicalization masked the 2026-08-19 hash-bypass defect for 25 failed openai dispatches; it is removed.
+- Prompt-cache `cache_control` rides as a first-class `Canonical::Message` member; the vLLM OpenAI-compatible wire render drops it, so the wire format is unchanged.
+- Raise the `lex-llm` dependency floor to 0.8.0.
+- The local-tree `lex-llm` path dependency in the test group resolves against the 0.8.0 contract cut during development.
+
+### Removed
+- `LegacyCoordinatorAdapter` compatibility wiring from the discovery runner (`Inventory::ScopedRefresher` is deleted in lex-llm 0.8.0); the `Inventory::Publisher` is constructed without a compatibility adapter.
+- The render-seam `build_canonical_messages` re-check — central enforcement (`Provider#enforce_canonical_messages!` in the `complete` funnel) is the one check point (08 F2).
 
 ### Added
-- Cover the canonical boundary in the dispatch-boundary conformance block: canonical passthrough preserves the `cache_control` member, the wire never leaks it, and plain-Hash input raises at both the callable and the render seam.
+- Conformance kit B1–B4 boundary groups run against the production `VllmCallable`: central canonical enforcement (08 F2), canonical outputs asserted by type (05 O5, 08 R2), operation preservation (PR #189 defect class), and no model re-derivation (PR #45 law).
+- Cover the canonical boundary in the dispatch-boundary conformance block: the canonical `cache_control` member survives on the message, the wire never leaks it, and plain-Hash input raises at the callable boundary and the `complete` funnel.
 
 ## [0.4.6] - 2026-08-19
 

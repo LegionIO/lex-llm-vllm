@@ -2,6 +2,7 @@
 
 require 'legion/extensions/llm/canonical'
 require 'legion/extensions/llm/responses/thinking_extractor'
+require 'legion/extensions/llm/responses/tool_arguments'
 require 'legion/extensions/llm/stop_reason_mapping'
 require 'legion/json'
 require 'legion/logging'
@@ -359,15 +360,6 @@ module Legion
         module TranslatorToolCallParseHelpers
           private
 
-          def parse_tool_arguments(arguments)
-            return {} if arguments.nil? || arguments == ''
-            return arguments if arguments.is_a?(Hash)
-
-            Legion::JSON.load(arguments)
-          rescue Legion::JSON::ParseError
-            {}
-          end
-
           def synthesize_tool_calls_from_content(content, _message)
             return [] unless content.is_a?(String) && !content.empty?
 
@@ -446,19 +438,19 @@ module Legion
             tool_calls
           end
 
+          # Sync tool calls: the ONE strict arguments parser (10 U2). Invalid
+          # or non-object JSON is a contract error that stays visible (04 L7,
+          # 08 E4) — never rescued into a fabricated empty call.
           def parse_tool_calls(tool_calls)
             return [] unless tool_calls.is_a?(Array) && !tool_calls.empty?
 
-            tool_calls.filter_map do |call|
+            tool_calls.map do |call|
               function = call.fetch('function', {})
               name = function['name']
               id = call['id'] || name || call['index']
               Canonical::ToolCall.build(id: id.to_s, name: name.to_s,
-                                        arguments: parse_tool_arguments(function['arguments']),
+                                        arguments: Responses::ToolArguments.parse!(function['arguments']),
                                         source: :client)
-            rescue StandardError => e
-              handle_exception(e, level: :warn, handled: true, operation: 'vllm.translator.parse_tool_call')
-              nil
             end
           end
 
@@ -521,20 +513,24 @@ module Legion
           end
 
           # Build a tool_call_delta chunk preserving OpenAI streaming fragment semantics.
-          # Opening fragments carry id + name; continuation fragments carry id: nil and a
-          # partial-JSON arguments string. StreamAccumulator keys off nil id to append.
+          # The tool_call member is the delta FRAGMENT (the documented Chunk shape):
+          # opening fragments carry id + name; continuation fragments carry id: nil and a
+          # partial-JSON arguments string. StreamAccumulator correlates on the wire
+          # index and appends by nil id. A full Canonical::ToolCall is wrong here —
+          # its arguments member is Hash-only (O03a) and the accumulator reads the
+          # fragment by symbol keys.
           def build_tool_call_delta_chunk(first_call, request_id, stop_reason: nil, usage: nil)
             function = first_call.fetch('function', {})
-            tc = Canonical::ToolCall.new(
-              id: first_call['id'], exchange_id: nil,
-              name: function['name'], arguments: function['arguments'].to_s,
-              source: :client, status: nil, duration_ms: nil, result: nil,
-              error: nil, started_at: nil, finished_at: nil, category: nil,
-              data_handling_classification: nil, policy_decision: nil
-            )
             Canonical::Chunk.tool_call_delta(
-              tool_call: tc, request_id: request_id,
-              block_index: first_call['index'], stop_reason: stop_reason, usage: usage
+              tool_call: {
+                id: first_call['id'],
+                name: function['name'],
+                arguments: function['arguments'].to_s,
+                index: first_call['index']
+              },
+              request_id: request_id,
+              block_index: first_call['index'],
+              stop_reason: stop_reason, usage: usage
             )
           end
 
@@ -585,7 +581,7 @@ module Legion
           def done_from_finish(data, request_id, finish_reason)
             Canonical::Chunk.done(
               request_id: request_id,
-              usage: Canonical::Usage.from_hash(data['usage']),
+              usage: data['usage'] ? Canonical::Usage.from_hash(data['usage']) : nil,
               stop_reason: map_stop_reason(finish_reason)
             )
           end

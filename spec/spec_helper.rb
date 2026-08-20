@@ -40,10 +40,15 @@ module Legion
 end
 
 # Load conformance kit from lex-llm gem's spec/ directory
-# (spec/ ships in the gem but is NOT on the load path)
+# (spec/ ships in the gem but is NOT on the load path). Skip lex-llm's own
+# *_spec.rb files in the kit dir — those are lex-llm-internal test suites
+# (they require lex-llm's spec support/ files, which are not on this gem's
+# load path); the kit content is the shared-example files.
 if Gem.loaded_specs['lex-llm']
   kit_path = File.join(Gem.loaded_specs['lex-llm'].full_gem_path, 'spec/legion/extensions/llm/conformance')
-  Dir[File.join(kit_path, '**', '*.rb')].each { |f| require f }
+  Dir[File.join(kit_path, '**', '*.rb')].each do |f|
+    require f unless File.basename(f).end_with?('_spec.rb')
+  end
 end
 
 if defined?(Legion::Logging)

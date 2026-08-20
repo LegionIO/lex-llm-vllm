@@ -213,10 +213,20 @@ RSpec.describe Legion::Extensions::Llm::Vllm do
     registry.reset!
     # Offline: stub the Faraday connection boundary so the production
     # callable's dispatch (VllmCallable -> Vllm::Provider -> Connection#post)
-    # reaches a canned response without a real HTTP round-trip. The exact-fleet
-    # example asserts the captured callable is the one invoked.
+    # reaches a canned response without a real HTTP round-trip. Streaming
+    # dispatch drives the REAL on_data SSE handler with canned lines, so
+    # render_payload, parse_chunk and the StreamAccumulator all run for
+    # stream_chat. The response echoes the requested model (provider wire
+    # behavior) so B4 can assert the Selection-derived model round-trips.
+    # NOTE: any_instance stubs receive the instance as the first block arg.
     allow_any_instance_of(Legion::Extensions::Llm::Connection)
-      .to receive(:post).and_return(completion_response)
+      .to receive(:post) do |_connection, _url, payload, &block|
+        fake_request = Struct.new(:options, :headers).new(Faraday::RequestOptions.new, {})
+        block&.call(fake_request)
+        on_data = fake_request.options.on_data
+        stream_sse_lines.each { |line| on_data.call(line, 0, nil) } if on_data
+        canned_completion_response(payload)
+      end
   end
 
   def completion_response
@@ -229,7 +239,39 @@ RSpec.describe Legion::Extensions::Llm::Vllm do
     )
   end
 
+  def canned_completion_response(payload)
+    Struct.new(:body).new(
+      {
+        'choices' => [{ 'message' => { 'role' => 'assistant', 'content' => 'conformance' } }],
+        'model' => payload[:model],
+        'usage' => { 'prompt_tokens' => 1, 'completion_tokens' => 1 }
+      }
+    )
+  end
+
+  def stream_sse_lines
+    body = { 'id' => 'stream-1', 'model' => 'stream-model',
+             'choices' => [{ 'delta' => { 'content' => 'hello' }, 'finish_reason' => nil }] }
+    ["data: #{Legion::JSON.dump(body)}\n\n", "data: [DONE]\n\n"]
+  end
+
   it_behaves_like 'an SSOT v3 provider adapter'
+
+  # ─── 0.8.0 conformance kit — boundary groups against the real callable ────
+  # The kit (09 §5) is the single oracle: the B boundary examples run against
+  # the PRODUCTION VllmCallable (D1/D6 — no fake returning canonical objects
+  # directly). The outer Connection#post stub serves the canned response and
+  # drives the real on_data SSE handler, so render_payload / parse_response /
+  # parse_chunk / StreamAccumulator all run on these paths.
+
+  describe '0.8.0 conformance kit — canonical boundary (B groups)' do
+    let(:callable) { ssot_harness.build_callable(instance_config: ssot_harness.instance_configs[0]) }
+
+    it_behaves_like 'B1 — central canonical enforcement (08 F2)'
+    it_behaves_like 'B2 — canonical outputs (05 O5, 08 R2)'
+    it_behaves_like 'B3 — operation preservation (PR #189 defect class)'
+    it_behaves_like 'B4 — no model re-derivation (PR #45 law)'
+  end
 
   # ─── vLLM-specific identity: config name + secondary physical id ───────────
 
@@ -931,7 +973,7 @@ RSpec.describe Legion::Extensions::Llm::Vllm do
         wire = provider.send(
           :render_payload,
           two_message_request,
-          tools: tool_set, temperature: nil, model: model_id,
+          tools: tool_set, params: nil, model: model_id,
           stream: false, schema: nil, thinking: nil, tool_prefs: nil
         )
       end.not_to raise_error
@@ -948,17 +990,13 @@ RSpec.describe Legion::Extensions::Llm::Vllm do
       wire[:messages].each { |m| expect(m).not_to have_key(:cache_control) }
     end
 
-    it 'passes canonical messages through build_canonical_messages, preserving the :cache_control member' do
-      canonical = provider.send(:build_canonical_messages, two_message_request)
-
-      expect(canonical).to all(be_a(Legion::Extensions::Llm::Canonical::Message))
-      expect(canonical.map(&:role)).to eq(%i[user assistant])
-      expect(canonical.map(&:content)).to eq(['What is the capital of France?', 'Paris.'])
-      # The canonical schema EXTENDS to carry cache_control (lex-llm 0.7.7);
-      # the metadata is preserved on the canonical object and dropped only at
-      # the provider wire render, never by the canonical layer.
+    it 'keeps the canonical :cache_control member on the message, dropped only at the wire render' do
+      # :cache_control is a first-class canonical member (lex-llm 0.8.0); the
+      # canonical object carries it through build/to_h and the wire render
+      # above is where — and only where — it is dropped.
       expect(Legion::Extensions::Llm::Canonical::Message.members).to include(:cache_control)
-      expect(canonical.map(&:cache_control)).to eq([{ type: 'ephemeral' }, nil])
+      expect(two_message_request.map(&:cache_control)).to eq([{ type: 'ephemeral' }, nil])
+      expect(two_message_request.first.to_h).to include(cache_control: { type: 'ephemeral' })
     end
 
     it 'rejects plain Hash messages at the dispatch boundary instead of re-canonicalizing them' do
@@ -968,25 +1006,28 @@ RSpec.describe Legion::Extensions::Llm::Vllm do
       ]
 
       # The 2026-08-19 defect class: hash messages silently re-canonicalized
-      # provider-side masked the bypass for 25 failed openai dispatches. The
-      # boundary now rejects loudly at both the callable and the render seam.
-      expect { callable.chat(messages: hash_request, model: model_id) }
+      # provider-side masked the bypass for 25 failed openai dispatches.
+      # Central enforcement (08 F2) rejects loudly at the callable boundary
+      # and in the Provider#complete funnel — the render seam no longer
+      # re-implements the check.
+      expect { callable.chat(hash_request, model: model_id) }
         .to raise_error(ArgumentError, /Canonical::Message/)
-      expect { provider.send(:render_payload, hash_request, stream: false, model: model_id) }
+      expect { provider.chat(hash_request, model: model_id) }
         .to raise_error(ArgumentError, /Canonical::Message/)
     end
 
     it 'completes a 2-message sync chat through the full provider path (render -> HTTP -> parse)' do
       # The Connection#post boundary is stubbed by the outer before block. If the
       # render path raised (hash input, unknown canonical members), the request
-      # never reached HTTP.
+      # never reached HTTP. B2: the sync parse returns Canonical::Response,
+      # asserted by type.
       result = nil
       expect do
-        result = provider.chat(messages: two_message_request, model: model_id, tools: tool_set)
+        result = provider.chat(two_message_request, model: model_id, tools: tool_set)
       end.not_to raise_error
 
-      expect(result).to be_a(Legion::Extensions::Llm::Message)
-      expect(result.content).to eq('conformance')
+      expect(result).to be_a(Legion::Extensions::Llm::Canonical::Response)
+      expect(result.text).to eq('conformance')
     end
 
     it 'normalizes a non-UTF-8 (ASCII-8BIT) RuntimeError message into a valid ProviderOutcome, not a ValidationError' do
@@ -1319,7 +1360,7 @@ RSpec.describe Legion::Extensions::Llm::Vllm do
       ]
 
       callable.chat(
-        messages: messages, model: 'meta-llama/Llama-3.1-8B-Instruct'
+        messages, model: 'meta-llama/Llama-3.1-8B-Instruct'
       )
 
       expect(captured[:path]).to eq('/v1/chat/completions')

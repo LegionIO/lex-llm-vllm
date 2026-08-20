@@ -3,7 +3,6 @@
 require 'legion/extensions/llm/inventory/publisher'
 require 'legion/extensions/llm/inventory/identity'
 require 'legion/extensions/llm/inventory/probe_coordinator'
-require 'legion/extensions/llm/inventory/scoped_refresher'
 require 'legion/extensions/llm/vllm/callable'
 
 module Legion
@@ -15,16 +14,8 @@ module Legion
             # Publisher + claim/activation/readiness-commit for the vLLM
             # discovery runner. Mixed into DiscoveryRefresh.
             module ClaimActivation
-              # D2: inject the legacy-coordinator compatibility bridge so the
-              # SSOT registry also projects into the old Legion::LLM::Inventory
-              # during the mixed-version window (no-op when it isn't loaded).
               def publisher
-                @publisher ||= Legion::Extensions::Llm::Inventory::Publisher.new(
-                  provider_family: :vllm,
-                  compatibility_adapter: Legion::Extensions::Llm::Inventory::ScopedRefresher::LegacyCoordinatorAdapter.new(
-                    provider_family: :vllm
-                  )
-                )
+                @publisher ||= Legion::Extensions::Llm::Inventory::Publisher.new(provider_family: :vllm)
               end
 
               # The operator's CONFIG NAME is the instance identity

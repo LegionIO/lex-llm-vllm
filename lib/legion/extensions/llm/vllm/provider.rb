@@ -68,146 +68,26 @@ module Legion
           end
         end
 
-        # ── Discovery + offering helpers (private) ────────────────────────────
-
-        # Private helpers for live offering discovery and capability resolution.
-        module ProviderDiscoveryHelpers
-          private
-
-          def discovery_registry_readiness(provider_health, live:)
-            {
-              provider: slug.to_sym,
-              configured: configured?,
-              ready: provider_health[:ready] == true,
-              live: live,
-              health: provider_health
-            }
-          end
-
-          def discover_live_offerings(filters, provider_health, live:)
-            readiness = discovery_registry_readiness(provider_health, live:)
-            Array(list_models(live:, **filters)).filter_map do |model|
-              self.class.registry_publisher.publish_models_async([model], readiness:)
-              next unless model_matches_filters?(model, filters)
-              next unless model_allowed?(model.id)
-
-              log_model_discovered(model)
-              offering_from_model(model, health: provider_health)
-            end
-          end
-
-          def log_model_discovered(model)
-            log.debug(
-              "[#{slug}] instance=#{provider_instance_id} action=model_discovered " \
-              "model=#{model.id} family=#{model.family}"
-            )
-          end
-
-          def log_discover_complete(offerings)
-            log.info(
-              "[#{slug}] instance=#{provider_instance_id} action=discover_complete " \
-              "model_count=#{Array(offerings).size}"
-            )
-          end
-
-          def offering_from_model(model_info, health: {})
-            cache_model_context(model_info)
-            policy = Legion::Extensions::Llm::CapabilityPolicy.resolve(
-              real: extract_real_capabilities(model_info),
-              provider_catalog: {},
-              probe: {},
-              provider_envelope: provider_envelope_capabilities,
-              provider_config: provider_capability_config,
-              instance_config: instance_capability_config,
-              model_config: model_capability_config(model_info.id)
-            )
-            build_offering(model_info, policy, model_info.context_length, health)
-          end
-
-          def cache_model_context(model_info)
-            ctx = model_info.context_length
-            return unless ctx
-
-            cache_set(model_detail_cache_key(model_info.id), { context_window: ctx }, ttl: 86_400)
-          rescue StandardError => e
-            handle_exception(e, level: :warn, handled: true, operation: 'vllm.cache_model_detail')
-          end
-
-          def build_offering(model_info, policy, ctx, health)
-            Legion::Extensions::Llm::Routing::ModelOffering.new(**offering_attrs(model_info, policy, ctx, health))
-          end
-
-          def offering_attrs(model_info, policy, ctx, health)
-            {
-              provider_family: :vllm,
-              instance_id: provider_instance_id,
-              transport: offering_transport,
-              tier: offering_tier,
-              model: model_info.id,
-              canonical_model_alias: optional_model_attr(model_info, :name),
-              model_family: optional_model_attr(model_info, :family),
-              usage_type: usage_type_for(policy),
-              capabilities: policy[:capabilities],
-              capability_sources: policy[:sources],
-              limits: { context_window: ctx,
-                        max_output_tokens: optional_model_attr(model_info, :max_output_tokens) }.compact,
-              health: health,
-              metadata: offering_metadata_for(model_info).merge(capability_sources: policy[:sources])
-            }
-          end
-
-          def usage_type_for(policy)
-            policy[:capabilities].include?(:embedding) ? :embedding : :inference
-          end
-
-          def optional_model_attr(model_info, attr)
-            model_info.respond_to?(attr) ? model_info.public_send(attr) : nil
-          end
-
-          def extract_real_capabilities(model_info)
-            return {} unless model_info.respond_to?(:metadata)
-
-            meta = model_info.metadata
-            meta_caps = meta.is_a?(Hash) ? meta[:capabilities] : nil
-            meta_caps.is_a?(Hash) ? meta_caps : {}
-          end
-
-          def provider_envelope_capabilities
-            { completion: true, streaming: true }
-          end
-
-          def offering_metadata_for(model_info)
-            {
-              raw_model: model_info.id,
-              parameter_count: model_info.respond_to?(:parameter_count) ? model_info.parameter_count : nil,
-              parameter_size: model_info.respond_to?(:parameter_size) ? model_info.parameter_size : nil,
-              quantization: model_info.respond_to?(:quantization) ? model_info.quantization : nil,
-              size_bytes: model_info.respond_to?(:size_bytes) ? model_info.size_bytes : nil
-            }.compact
-          end
-        end
-
         # ── Canonical request bridge helpers (private) ────────────────────────
 
-        # Private helpers for converting provider call args into Canonical::Request.
+        # Private helpers for building the vLLM Canonical::Request (the
+        # provider-native dialect shape with the folded system prompt) from
+        # the canonical values the base funnel delivers. Canonical
+        # normalization (messages/tools/params/thinking) is the
+        # Canonical::Request factory's job — this bridge only folds the
+        # vLLM dialect concerns (system extraction, schema into
+        # response_format, model into metadata).
         module ProviderCanonicalRequestBridge
           private
 
-          def build_canonical_request(messages:, **opts)
-            tools = opts[:tools]
-            temperature = opts[:temperature]
-            model      = opts[:model]
-            stream     = opts[:stream]
-            schema     = opts[:schema]
-            thinking   = opts[:thinking]
-            tool_prefs = opts[:tool_prefs]
+          def build_canonical_request(messages:, tools:, tool_prefs:, model:, stream:, schema:, thinking:, params:)
             Canonical::Request.build(
-              messages: build_canonical_messages(messages),
+              messages: messages,
               system: extract_system_prompt(messages),
-              tools: build_canonical_tools(tools),
+              tools: tools,
               tool_choice: format_tool_choice_from_prefs(tool_prefs),
-              params: build_canonical_params(temperature: temperature, schema: schema),
-              thinking: build_canonical_thinking(thinking),
+              params: canonical_params_with_schema(params, schema),
+              thinking: thinking,
               stream: stream,
               metadata: { model: extract_model_id(model) }
             )
@@ -217,53 +97,17 @@ module Legion
             model.respond_to?(:id) ? model.id : model.to_s
           end
 
-          # Canonical boundary: pipeline dispatch delivers Canonical::Message
-          # objects; the provider-native Chat facade delivers lex-llm Message.
-          # Both are object shapes this spoke converts to canonical. Plain
-          # Hashes are the bypass class (the 2026-08-19 incident) — reject
-          # loudly, never silently re-canonicalize.
-          def build_canonical_messages(messages)
-            messages.map do |msg|
-              next msg if msg.is_a?(Canonical::Message)
-              next Canonical::Message.from_hash(msg.to_h) if msg.is_a?(Legion::Extensions::Llm::Message)
+          # The vLLM translator renders response_format from canonical params
+          # (no separate schema leg on this dialect), so the edge schema folds
+          # into params.response_format at the render boundary.
+          def canonical_params_with_schema(params, schema)
+            return params unless schema
 
-              raise ArgumentError,
-                    "vllm provider input must be Canonical::Message objects, got #{msg.class} — " \
-                    'non-canonical message shapes must not cross the dispatch boundary'
+            if params.is_a?(Canonical::Params)
+              params.with(response_format: schema)
+            else
+              Canonical::Params.from_hash((params || {}).to_h.merge(response_format: schema))
             end
-          end
-
-          def build_canonical_tools(tools)
-            tools.to_h.transform_values do |tool|
-              if tool.is_a?(Canonical::ToolDefinition)
-                tool
-              else
-                Canonical::ToolDefinition.from_hash(tool.respond_to?(:to_h) ? tool.to_h : tool)
-              end
-            end
-          end
-
-          def build_canonical_params(temperature:, schema:)
-            hash = { temperature: temperature }
-            hash[:response_format] = schema if schema
-            Canonical::Params.from_hash(hash)
-          end
-
-          def build_canonical_thinking(thinking)
-            return thinking_config_from_object(thinking) if thinking.respond_to?(:enabled?) && thinking.enabled?
-
-            thinking_config_from_hash(thinking) if thinking.is_a?(Hash)
-          end
-
-          def thinking_config_from_object(thinking)
-            Canonical::Thinking::Config.new(effort: thinking.respond_to?(:effort) ? thinking.effort : nil)
-          end
-
-          def thinking_config_from_hash(thinking)
-            Canonical::Thinking::Config.new(
-              effort: thinking[:effort] || thinking['effort'],
-              budget: thinking[:budget] || thinking['budget']
-            )
           end
 
           def format_tool_choice_from_prefs(tool_prefs)
@@ -295,93 +139,18 @@ module Legion
           end
         end
 
-        # ── Legacy bridge helpers (private) ──────────────────────────────────
-
-        # Private helpers for converting Canonical responses back to legacy types.
-        module ProviderLegacyBridge
-          private
-
-          def to_legacy_message(canonical, raw_body, _raw_response)
-            usage = canonical.usage || {}
-            Legion::Extensions::Llm::Message.new(
-              role: :assistant,
-              content: canonical.text,
-              model_id: canonical.model,
-              tool_calls: legacy_tool_calls_hash(canonical),
-              thinking: legacy_thinking(canonical),
-              input_tokens: optional_usage_attr(usage, :input_tokens),
-              output_tokens: optional_usage_attr(usage, :output_tokens),
-              reasoning_tokens: optional_usage_attr(usage, :thinking_tokens),
-              raw: raw_body
-            )
-          end
-
-          def legacy_thinking(canonical)
-            return nil unless canonical.thinking
-
-            Thinking.build(text: canonical.thinking.content, signature: canonical.thinking.signature)
-          end
-
-          def legacy_tool_calls_hash(canonical)
-            result = {}
-            canonical.tool_calls.each do |tc|
-              key = (tc.name || tc.id).to_s.to_sym
-              result[key] = Legion::Extensions::Llm::ToolCall.new(id: tc.id, name: tc.name, arguments: tc.arguments)
-            end
-            result.empty? ? nil : result
-          end
-
-          def optional_usage_attr(usage, attr)
-            usage.respond_to?(attr) ? usage.public_send(attr) : nil
-          end
-
-          def to_legacy_chunk(canonical, raw_data)
-            usage = canonical&.usage || {}
-
-            content = canonical.delta
-            thinking = nil
-            if canonical.type == :thinking_delta
-              thinking = Thinking.build(text: canonical.delta)
-              content = nil
-            end
-
-            Legion::Extensions::Llm::Chunk.new(
-              role: :assistant,
-              content: content,
-              model_id: raw_data['model'],
-              tool_calls: legacy_chunk_tool_calls(canonical),
-              thinking: thinking,
-              input_tokens: usage.respond_to?(:input_tokens) ? usage.input_tokens : nil,
-              output_tokens: usage.respond_to?(:output_tokens) ? usage.output_tokens : nil,
-              stop_reason: canonical.stop_reason,
-              raw: raw_data
-            )
-          end
-
-          def legacy_chunk_tool_calls(canonical)
-            return nil unless canonical.type == :tool_call_delta && canonical.tool_call
-
-            tc = canonical.tool_call
-            key = (tc.id || tc.name || :fragment).to_s.to_sym
-            {
-              key => Legion::Extensions::Llm::ToolCall.new(
-                id: tc.id,
-                name: tc.name,
-                arguments: tc.arguments,
-                index: canonical.block_index
-              )
-            }
-          end
-        end
-
         # ── Render + parse helpers (private) ─────────────────────────────────
 
-        # Private helpers for payload rendering, response parsing, and thinking.
+        # Private helpers for the render and parse boundaries (08 R1/R2):
+        # render FROM canonical values, parse TO canonical types.
         module ProviderRenderParseHelpers
           private
 
-          def render_payload(messages, **)
-            canonical_req = build_canonical_request(messages: messages, **)
+          def render_payload(messages, tools:, tool_prefs:, model:, stream:, schema:, thinking:, params:)
+            canonical_req = build_canonical_request(
+              messages: messages, tools: tools, tool_prefs: tool_prefs, model: model,
+              stream: stream, schema: schema, thinking: thinking, params: params
+            )
             wire = translator.render_request(canonical_req)
             log.debug do
               "vLLM provider rendered wire payload model=#{wire[:model]} stream=#{wire[:stream]} " \
@@ -390,46 +159,12 @@ module Legion
             wire
           end
 
-          def thinking_enabled?(thinking)
-            return true if thinking.is_a?(Hash) && (thinking[:enabled] != false)
-            return true if thinking.respond_to?(:enabled?) && thinking.enabled?
-            return vllm_thinking_setting unless thinking
-
-            false
-          end
-
-          def vllm_thinking_setting
-            instance_thinking_enabled? || global_thinking_enabled?
-          rescue StandardError => e
-            handle_exception(e, level: :warn, handled: true, operation: 'vllm.thinking_setting')
-            false
-          end
-
-          def instance_thinking_enabled?
-            return config.enable_thinking if config.respond_to?(:enable_thinking)
-
-            config.respond_to?(:[]) && config[:enable_thinking] == true
-          end
-
-          def global_thinking_enabled?
-            settings[:enable_thinking] == true
-          end
-
           def parse_completion_response(response)
-            body = response.body
-            canonical = translator.parse_response(body)
-            to_legacy_message(canonical, body, response)
+            translator.parse_response(response.body)
           end
 
           def build_chunk(data)
-            result = translator.parse_chunk(data)
-            return nil if result.nil?
-
-            if result.is_a?(Array)
-              result.map { |c| to_legacy_chunk(c, data) }
-            else
-              to_legacy_chunk(result, data)
-            end
+            translator.parse_chunk(data)
           end
 
           def parse_list_models_response(response, provider, capabilities)
@@ -456,9 +191,7 @@ module Legion
           include Legion::Extensions::Llm::Provider::OpenAICompatible
           include Legion::Logging::Helper
           include ProviderManagementMethods
-          include ProviderDiscoveryHelpers
           include ProviderCanonicalRequestBridge
-          include ProviderLegacyBridge
           include ProviderRenderParseHelpers
 
           class << self
@@ -540,18 +273,6 @@ module Legion
             super.tap do |models|
               log.info { "discovered #{models.size} model(s) from vLLM" }
             end
-          end
-
-          def discover_offerings(live: false, **filters)
-            return filter_cached_offerings(Array(@cached_offerings), filters) unless live
-
-            provider_health = health(live:)
-            @cached_offerings = discover_live_offerings(filters, provider_health, live:)
-            log_discover_complete(@cached_offerings)
-            @cached_offerings
-          rescue StandardError => e
-            handle_exception(e, level: :warn, handled: true, operation: 'vllm.discover_offerings')
-            []
           end
         end
       end
