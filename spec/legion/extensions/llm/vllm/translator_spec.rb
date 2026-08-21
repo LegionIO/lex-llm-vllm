@@ -135,6 +135,45 @@ RSpec.describe Legion::Extensions::Llm::Vllm::Translator do
         expect(result.tool_calls).to be_empty
       end
     end
+
+    # V1: the parse side of thinking was untested — the strict factory
+    # (Canonical::Thinking.build) must construct valid data for the
+    # Qwen-style reasoning wire, with or without a signature.
+    context 'with reasoning_content metadata (Qwen-style thinking wire)' do
+      it 'builds a Canonical::Thinking with content and nil signature' do
+        wire = {
+          'choices' => [{
+            'message' => { 'content' => 'The answer is 42.', 'reasoning_content' => 'Let me work it out.' },
+            'finish_reason' => 'stop'
+          }],
+          'usage' => { 'prompt_tokens' => 5, 'completion_tokens' => 20 },
+          'model' => 'qwen3.6-27b'
+        }
+        result = translator.parse_response(wire)
+
+        expect(result.text).to eq('The answer is 42.')
+        expect(result.thinking).to be_a(canonical::Thinking)
+        expect(result.thinking.content).to eq('Let me work it out.')
+        expect(result.thinking.signature).to be_nil
+      end
+
+      it 'builds a Canonical::Thinking carrying the wire signature' do
+        wire = {
+          'choices' => [{
+            'message' => {
+              'content' => 'The answer is 42.',
+              'reasoning_content' => 'Let me work it out.',
+              'reasoning_signature' => 'sig-abc'
+            },
+            'finish_reason' => 'stop'
+          }],
+          'usage' => { 'prompt_tokens' => 5, 'completion_tokens' => 20 }
+        }
+        result = translator.parse_response(wire)
+
+        expect(result.thinking.signature).to eq('sig-abc')
+      end
+    end
   end
 
   describe 'stop_reason mapping' do

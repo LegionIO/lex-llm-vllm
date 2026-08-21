@@ -423,10 +423,13 @@ module Legion
             }.compact
           end
 
+          # V1: the shared strict factory — the raw Data#new bypass is
+          # deleted (under the H1 strict constructor it was also a latent
+          # missing-keyword crash: metadata has no default).
           def build_canonical_thinking(extraction)
             return nil unless extraction.thinking || extraction.signature
 
-            Canonical::Thinking.new(content: extraction.thinking, signature: extraction.signature)
+            Canonical::Thinking.build(content: extraction.thinking, signature: extraction.signature)
           end
 
           def resolve_tool_calls(extraction, message)

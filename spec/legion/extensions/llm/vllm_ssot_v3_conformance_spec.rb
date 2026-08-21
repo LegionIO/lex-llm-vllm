@@ -953,13 +953,16 @@ RSpec.describe Legion::Extensions::Llm::Vllm do
       ]
     end
 
+    # H3 (0.8.0 funnel): the dispatch boundary enforces
+    # Hash<name, Canonical::ToolDefinition> — raw Hash tools are the bypass
+    # class and no longer cross chat/stream_chat.
     let(:tool_set) do
       {
-        get_weather: {
+        get_weather: Legion::Extensions::Llm::Canonical::ToolDefinition.build(
           name: 'get_weather',
           description: 'Get the current weather for a city',
           parameters: { type: 'object', properties: { city: { type: 'string' } }, required: %w[city] }
-        }
+        )
       }
     end
 

@@ -202,10 +202,6 @@ module Legion
             def configuration_options = %i[vllm_api_base vllm_api_key]
             def configuration_requirements = []
             def capabilities = Capabilities
-
-            def registry_publisher
-              Vllm.registry_publisher
-            end
           end
 
           # Capability predicates for vLLM OpenAI-compatible model offerings.
@@ -264,8 +260,19 @@ module Legion
           def readiness(live: false)
             log.info { "checking readiness live=#{live} at #{api_base}" }
             super.tap do |metadata|
-              self.class.registry_publisher.publish_readiness_async(metadata) if live
+              registry_publisher.publish_readiness_async(metadata) if live
             end
+          end
+
+          # M6: the instance identity is CARRIED — the operator's config name,
+          # the single config→id derivation (base provider_instance_id via
+          # Inventory::Identity). A nearby layer never derives identity; the
+          # gem-level identity-less publisher is deleted.
+          def registry_publisher
+            @registry_publisher ||= Legion::Extensions::Llm::RegistryPublisher.new(
+              provider_family: PROVIDER_FAMILY,
+              provider_instance: provider_instance_id
+            )
           end
 
           def list_models(live: false, **filters)

@@ -41,10 +41,6 @@ module Legion
           Provider
         end
 
-        def self.registry_publisher
-          @registry_publisher ||= Legion::Extensions::Llm::RegistryPublisher.new(provider_family: PROVIDER_FAMILY)
-        end
-
         def self.discover_instances
           instances = {}
           configured = settings[:instances]

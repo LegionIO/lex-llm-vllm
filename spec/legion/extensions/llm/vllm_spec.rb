@@ -80,7 +80,7 @@ RSpec.describe Legion::Extensions::Llm::Vllm do
   end
 
   it 'publishes live readiness metadata asynchronously through the registry publisher' do
-    allow(described_class).to receive(:registry_publisher).and_return(registry_publisher)
+    allow(provider).to receive(:registry_publisher).and_return(registry_publisher)
     allow(provider.connection).to receive(:get).with('/health').and_return(fake_response({}))
     allow(registry_publisher).to receive(:publish_readiness_async)
 
@@ -169,11 +169,15 @@ RSpec.describe Legion::Extensions::Llm::Vllm do
     expect(events.first.to_h.dig(:offering, :model)).to eq('meta-llama/Llama-3.1-8B-Instruct')
   end
 
-  it 'delegates registry_publisher to the base RegistryPublisher class' do
-    publisher = described_class.registry_publisher
+  # M6: the publisher CARRIES the instance identity (the operator's config
+  # name via the base provider_instance_id) — the identity-less gem-level
+  # publisher is deleted.
+  it 'builds the registry publisher with the carried instance identity' do
+    publisher = provider.registry_publisher
 
     expect(publisher).to be_a(Legion::Extensions::Llm::RegistryPublisher)
     expect(publisher.provider_family).to eq(:vllm)
+    expect(publisher.provider_instance).to eq(provider.provider_instance_id)
   end
 
   describe '.discover_instances' do
@@ -327,7 +331,7 @@ RSpec.describe Legion::Extensions::Llm::Vllm do
   end
 
   def capture_registry_events(models, readiness:)
-    publisher = Legion::Extensions::Llm::RegistryPublisher.new(provider_family: :vllm)
+    publisher = Legion::Extensions::Llm::RegistryPublisher.new(provider_family: :vllm, provider_instance: 'default')
     events = []
     allow(publisher).to receive(:publishing_available?).and_return(true)
     allow(publisher).to receive(:publish_event) { |event| events << event }

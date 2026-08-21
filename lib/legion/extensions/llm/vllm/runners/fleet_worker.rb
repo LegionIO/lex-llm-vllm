@@ -40,8 +40,6 @@ module Legion
               Legion::Extensions::Llm::Fleet::ProviderResponder.call(
                 payload: payload,
                 provider_family: Vllm::PROVIDER_FAMILY,
-                provider_class: Vllm::Provider,
-                provider_instances: -> { Vllm.discover_instances },
                 registry: Legion::Extensions::Llm::Inventory::Registry,
                 delivery: delivery,
                 properties: properties
