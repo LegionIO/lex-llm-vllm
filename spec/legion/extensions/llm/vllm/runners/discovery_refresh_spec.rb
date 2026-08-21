@@ -53,9 +53,12 @@ RSpec.describe Legion::Extensions::Llm::Vllm::Runners::DiscoveryRefresh do
     )
   end
 
+  # V8: readiness failure carries a class-name reason and error_class
+  # metadata — no exception message, no endpoint.
   let(:not_ready_result) do
     Legion::Extensions::Llm::Inventory::ReadinessResult.new(
-      ready: false, reason: 'vLLM /health connection failed: refused', metadata: { error_class: 'Faraday::ConnectionFailed' }
+      ready: false, reason: 'vLLM /health failed (Faraday::ConnectionFailed)',
+      metadata: { error_class: 'Faraday::ConnectionFailed' }
     )
   end
 
@@ -131,10 +134,13 @@ RSpec.describe Legion::Extensions::Llm::Vllm::Runners::DiscoveryRefresh do
       runner.refresh
 
       health = settings_tree.dig(:instances, :apollo, :health)
+      # V14: the AvailabilityFact's own vocabulary — the pre-SSOT circuit
+      # dial (circuit_state/adjustment) is gone from the settings tree.
       expect(health).to include(
-        circuit_state: :closed, denied: false, available: true, adjustment: 0,
-        source: :startup_readiness, last_probe_outcome: :success
+        state: :available, source: :startup_readiness, last_probe_outcome: :success
       )
+      expect(health).not_to have_key(:circuit_state)
+      expect(health).not_to have_key(:adjustment)
       expect(health[:reason]).to be_a(String)
       expect(health[:observed_at]).to be_a(String)
     end
@@ -175,15 +181,20 @@ RSpec.describe Legion::Extensions::Llm::Vllm::Runners::DiscoveryRefresh do
     end
   end
 
-  describe 'D4 half-open health while recovery is pending' do
+  describe 'D4 display health while recovery is pending' do
     let(:raw_instances) { { apollo: { vllm_api_base: 'http://apollo:8000', tier: :local } } }
     let(:health_results) { [not_ready_result] }
 
-    it 'reports :initializing health (half_open) while the instance is down (D14)' do
+    # V14: an :initializing instance is projected as :initializing — the
+    # AvailabilityFact has no half-open state, so the old half_open
+    # mislabel (and its -50 adjustment) is gone.
+    it 'reports the :initializing AvailabilityFact state while the instance is down (D14)' do
       runner.refresh
 
       health = settings_tree.dig(:instances, :apollo, :health)
-      expect(health).to include(circuit_state: :half_open, available: true, adjustment: -50)
+      expect(health).to include(state: :initializing)
+      expect(health).not_to have_key(:circuit_state)
+      expect(health).not_to have_key(:adjustment)
     end
   end
 
@@ -216,7 +227,7 @@ RSpec.describe Legion::Extensions::Llm::Vllm::Runners::DiscoveryRefresh do
       runner.refresh # tick 2: cadence probe now fails -> unavailable
 
       expect(registry.snapshot.instance(instance_key: key(:apollo)).availability.state).to eq(:unavailable)
-      expect(settings_tree.dig(:instances, :apollo, :health)).to include(circuit_state: :open, available: false, adjustment: -50)
+      expect(settings_tree.dig(:instances, :apollo, :health)).to include(state: :unavailable)
     end
   end
 
@@ -721,13 +732,16 @@ RSpec.describe Legion::Extensions::Llm::Vllm::Runners::DiscoveryRefresh do
     end
   end
 
-  # D16: a programming error in the discovery path must fail loud — swallowing
-  # it to [] publishes ZERO offerings and makes an activated instance invisible
-  # to the coordinator. Only network/runtime errors may yield an empty set.
-  describe 'D16 loud programming errors' do
+  # D16: a programming error in the discovery path must fail loud —
+  # swallowing it to [] publishes ZERO offerings and makes an activated
+  # instance invisible to the coordinator.
+  # V3: a network/runtime fetch failure is a typed CatalogFetchFailure —
+  # NOT an empty catalog. The old fail-to-[] conflation let a transient
+  # timeout replace a live instance's published offerings with zero.
+  describe 'D16/V3 loud discovery failures' do
     let(:cfg) { { vllm_api_base: 'http://apollo:8000', tier: :local } }
 
-    it 're-raises a programming error from offering-building instead of returning []' do
+    it 're-raises a programming error from offering-building' do
       allow_any_instance_of(Legion::Extensions::Llm::Vllm::Helpers::OfferingBuilder)
         .to receive(:build).and_raise(NameError, 'uninitialized constant Foo')
 
@@ -735,10 +749,66 @@ RSpec.describe Legion::Extensions::Llm::Vllm::Runners::DiscoveryRefresh do
         .to raise_error(NameError)
     end
 
-    it 'still yields an empty set for a network error (Faraday)' do
+    it 'raises CatalogFetchFailure for a network error (Faraday) instead of returning []' do
       allow(runner).to receive(:fetch_models).and_raise(Faraday::ConnectionFailed, 'connection refused')
 
-      expect(runner.fetch_offerings(instance_cfg: cfg, instance_key: key(:apollo))).to eq([])
+      expect { runner.fetch_offerings(instance_cfg: cfg, instance_key: key(:apollo)) }
+        .to raise_error(described_class::CatalogFetchFailure, /Faraday::ConnectionFailed/)
+    end
+
+    it 'raises CatalogFetchFailure for a non-2xx catalog response' do
+      # The before-block stubs fetch_models to a canned catalog — restore
+      # the real method so the Faraday layer (and the status check) runs.
+      allow(runner).to receive(:fetch_models).and_call_original
+      response = Struct.new(:status, :body).new(500, '{"error": "boom"}')
+      conn = instance_double(Faraday::Connection, get: response)
+      allow(runner).to receive(:build_catalog_connection).and_return(conn)
+
+      expect { runner.fetch_models(instance_cfg: cfg) }
+        .to raise_error(described_class::CatalogFetchFailure, /HTTP 500/)
+    end
+
+    it 'keeps a published snapshot when the catalog fetch fails on an active instance' do
+      runner.refresh
+      expect(registry.snapshot.instance(instance_key: key(:apollo)).availability.state).to eq(:available)
+      published = registry.snapshot.offerings_for(instance_key: key(:apollo))
+      sequence = registry.snapshot.publication_status(instance_key: key(:apollo)).published_sequence
+      publisher = runner.publisher
+      replacements = []
+      allow(publisher).to receive(:replace_instance_snapshot) do |**kwargs|
+        replacements << kwargs
+      end
+
+      allow(runner).to receive(:fetch_models).and_raise(Faraday::TimeoutError, 'timed out')
+      runner.refresh
+
+      expect(replacements).to be_empty
+      expect(registry.snapshot.offerings_for(instance_key: key(:apollo))).to eq(published)
+      expect(registry.snapshot.publication_status(instance_key: key(:apollo)).published_sequence)
+        .to eq(sequence)
+      expect(registry.snapshot.instance(instance_key: key(:apollo)).availability.state).to eq(:available)
+    end
+
+    it 'does not activate an empty instance when the claim-time fetch fails' do
+      allow(runner).to receive(:fetch_models).and_raise(Faraday::ConnectionFailed, 'connection refused')
+
+      runner.refresh
+
+      # Health is ready, but the instance must NOT activate from a failed
+      # observation — it stays :initializing until a successful fetch.
+      expect(registry.snapshot.publication_status(instance_key: key(:apollo)).state).to eq(:initializing)
+      expect(registry.snapshot.instance(instance_key: key(:apollo))).to be_nil
+    end
+
+    it 'activates on the next tick once the catalog fetch succeeds again' do
+      allow(runner).to receive(:fetch_models).and_raise(Faraday::ConnectionFailed, 'connection refused')
+      runner.refresh
+      expect(registry.snapshot.publication_status(instance_key: key(:apollo)).state).to eq(:initializing)
+
+      allow(runner).to receive(:fetch_models).and_return(models)
+      runner.refresh
+
+      expect(registry.snapshot.instance(instance_key: key(:apollo)).availability.state).to eq(:available)
     end
   end
 

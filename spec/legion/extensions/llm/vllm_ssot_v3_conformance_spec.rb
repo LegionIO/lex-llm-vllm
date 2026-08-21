@@ -146,11 +146,13 @@ class VllmSsotHarness
     )
   end
 
-  def safe_readiness(instance_config:, **)
+  # V8: readiness metadata carries the status class only — no endpoint in
+  # registry-published state (mirrors the production check_health shape).
+  def safe_readiness(**)
     Legion::Extensions::Llm::Inventory::ReadinessResult.new(
       ready: true,
       reason: 'vLLM /health returned 200',
-      metadata: { status: 200, base_url: instance_config[:vllm_api_base] }
+      metadata: { status: 200 }
     )
   end
 
@@ -1033,7 +1035,7 @@ RSpec.describe Legion::Extensions::Llm::Vllm do
       expect(result.text).to eq('conformance')
     end
 
-    it 'normalizes a non-UTF-8 (ASCII-8BIT) RuntimeError message into a valid ProviderOutcome, not a ValidationError' do
+    it 'normalizes a non-UTF-8 (ASCII-8BIT) RuntimeError into a valid ProviderOutcome with a class-name reason' do
       binary = "vllm dispatch failed: \xFF\xFE invalid body bytes \x80\x81".dup.force_encoding(Encoding::ASCII_8BIT)
       error = RuntimeError.new(binary)
 
@@ -1042,14 +1044,15 @@ RSpec.describe Legion::Extensions::Llm::Vllm do
 
       expect(outcome).to be_a(Legion::Extensions::Llm::Routing::ProviderOutcome)
       expect(outcome.kind).to eq(:provider_error)
-      expect(outcome.reason).to be_a(String)
+      # V5: the reason is the bounded exception CLASS name — the non-UTF-8
+      # message never flows into the outcome, so the encoding hazard is
+      # structural (no message bytes cross the boundary), not a scrub.
+      expect(outcome.reason).to eq('RuntimeError')
       expect(outcome.reason.encoding).to eq(Encoding::UTF_8)
       expect(outcome.reason).to be_valid_encoding
-      expect(outcome.reason).to start_with('vllm dispatch failed: ')
-      expect(outcome.reason).to include('invalid body bytes')
     end
 
-    it 'normalizes a Faraday::ServerError with a non-UTF-8 message/body into a valid ProviderOutcome' do
+    it 'normalizes a Faraday::ServerError with a non-UTF-8 message/body into a class-name reason' do
       env = Faraday::Env.new
       env[:status] = 500
       env[:headers] = {}
@@ -1062,9 +1065,8 @@ RSpec.describe Legion::Extensions::Llm::Vllm do
       expect { outcome = callable.normalize_dispatch_error(error: error) }.not_to raise_error
 
       expect(outcome.kind).to eq(:provider_error)
-      expect(outcome.reason.encoding).to eq(Encoding::UTF_8)
+      expect(outcome.reason).to eq('Faraday::ServerError')
       expect(outcome.reason).to be_valid_encoding
-      expect(outcome.reason).to start_with('500 - raw upstream body ')
     end
   end
 

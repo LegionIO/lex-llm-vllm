@@ -120,22 +120,29 @@ module Legion
             { name: choice.to_s }
           end
 
+          # V15: an unsupported system-prompt shape fails at the edge
+          # instead of vanishing. The vLLM dialect folds a plain-String
+          # system into the request; block-shaped system content is not
+          # representable on this dialect, so it is a contract error, not
+          # a silently dropped authoritative request fact.
           def extract_system_prompt(messages)
             return nil unless messages.is_a?(Array) && !messages.empty?
 
             first = messages.first
             return nil unless first && system_message?(first)
 
-            message_content_string(first)
+            content = first.content
+            unless content.nil? || content.is_a?(::String)
+              raise ArgumentError,
+                    "vllm.extract_system_prompt: system prompt must be a plain String, got #{content.class} — " \
+                    'block-shaped system prompts are not supported on the vLLM dialect edge'
+            end
+
+            content
           end
 
           def system_message?(msg)
             msg.role.to_sym == :system
-          end
-
-          def message_content_string(msg)
-            content = msg.content
-            content.is_a?(String) ? content : nil
           end
         end
 
@@ -200,19 +207,39 @@ module Legion
             def default_transport = :http
             def default_tier = :direct
             def configuration_options = %i[vllm_api_base vllm_api_key]
-            def configuration_requirements = []
+            # V6: an explicit endpoint is what makes a vLLM instance
+            # executable — construction fails without it (the base
+            # ensure_configured! / configured? contract), and there is no
+            # localhost or sibling-endpoint fallback anywhere.
+            def configuration_requirements = %i[vllm_api_base]
             def capabilities = Capabilities
           end
 
-          # Capability predicates for vLLM OpenAI-compatible model offerings.
+          # Capability predicates for vLLM OpenAI-compatible model
+          # offerings. V7: per-model derivation — the same model-type split
+          # the production OfferingBuilder publishes: an embedding model
+          # does not serve chat or streaming, a chat model does not serve
+          # embeds. The static every-model-`streaming` claims are deleted.
           module Capabilities
             module_function
 
-            def chat?(_model) = true
-            def streaming?(_model) = true
+            # The one model-type predicate, shared with
+            # Helpers::OfferingBuilder. The catalog path hands string-keyed
+            # wire hashes; the discovery path hands symbol-keyed JSON —
+            # both shapes resolve here.
+            def embedding_model?(model)
+              data = model.is_a?(Hash) ? model : {}
+              type = data[:type] || data['type']
+              model_caps = data[:capabilities] || data['capabilities']
+              type.to_s == 'embedding' ||
+                (model_caps.is_a?(Array) && model_caps.include?('embedding'))
+            end
+
+            def chat?(model) = !embedding_model?(model)
+            def streaming?(model) = !embedding_model?(model)
             def vision?(_model) = false
             def functions?(_model) = false
-            def embeddings?(_model) = false
+            def embeddings?(model) = embedding_model?(model)
 
             def critical_capabilities_for(model)
               [
@@ -226,16 +253,23 @@ module Legion
 
           def stream_usage_supported? = true
 
-          def settings
-            Vllm.default_settings
-          end
-
           def translator
             @translator ||= Translator.new(config: config)
           end
 
+          # V6: the instance's OWN explicit endpoint only. The gem-template
+          # instances.default fallback is deleted — an instance with no
+          # resolvable endpoint is unexecutable, exactly as the discovery
+          # path already treats it (skip; never claim at localhost or a
+          # sibling instance's endpoint).
           def api_base
-            normalize_url(config.vllm_api_base || settings.dig(:instances, :default, :endpoint))
+            base = config.vllm_api_base
+            if base.nil? || base.to_s.strip.empty?
+              raise Legion::Extensions::Llm::ConfigurationError,
+                    'vllm instance has no vllm_api_base — an instance without an explicit endpoint is unexecutable'
+            end
+
+            normalize_url(base)
           end
 
           def headers

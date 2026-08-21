@@ -27,7 +27,20 @@ module Legion
                   provider_family: :vllm, instance_id: instance_id,
                   physical_id: derive_physical_id(instance_cfg: instance_cfg)
                 )
-                offerings = fetch_offerings(instance_cfg: instance_cfg, instance_key: instance_key)
+                # V3: a failed fetch is not a catalog fact — claim with an
+                # empty unpublished cache and defer the immediate readiness
+                # to the next :initializing tick, which re-fetches before the
+                # instance can activate (never activated with zero offerings
+                # from a failed observation).
+                begin
+                  offerings = fetch_offerings(instance_cfg: instance_cfg, instance_key: instance_key)
+                rescue CatalogFetchFailure
+                  log.debug do
+                    "vLLM discovery: catalog fetch failed at claim for #{instance_id} — " \
+                      'deferring readiness to the next tick'
+                  end
+                  offerings = nil
+                end
                 callable = Legion::Extensions::Llm::Vllm::VllmCallable.new(instance_cfg: instance_cfg, logger: log)
                 probe_coordinator = Legion::Extensions::Llm::Inventory::ProbeCoordinator.new(
                   instance_key: instance_key, enqueue: build_probe_enqueue(instance_id: instance_id)
@@ -39,7 +52,7 @@ module Legion
                 state = {
                   name: instance_id, instance_key: instance_key, instance_cfg: instance_cfg,
                   callable: callable, probe_coordinator: probe_coordinator,
-                  publisher_token: publisher_token, sequence: 0, offerings: offerings
+                  publisher_token: publisher_token, sequence: 0, offerings: offerings || []
                 }
                 Legion::Extensions::Llm::Inventory::WeightReconciler.track_initializing!(
                   states: instance_states,
@@ -47,7 +60,7 @@ module Legion
                   state: state,
                   mutex: state_mutex
                 )
-                perform_readiness(instance_id: instance_id, state: state, offerings: offerings)
+                perform_readiness(instance_id: instance_id, state: state, offerings: offerings) if offerings
               end
 
               # Run a readiness probe and commit the outcome. While the instance

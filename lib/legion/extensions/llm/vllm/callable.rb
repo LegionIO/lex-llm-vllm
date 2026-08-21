@@ -80,12 +80,17 @@ module Legion
             provider.count_tokens(messages: messages, model: model, params: params)
           end
 
+          # V5: the reason is the bounded exception CLASS name (the base
+          # contract) — never the message, which embeds endpoint URLs and
+          # provider error bodies that must not reach shared state. The
+          # kind override stays: vLLM's explicit offline body phrases are
+          # stronger evidence than a raw status (the base law that raw 503
+          # alone never manufactures unavailability is preserved).
           def normalize_dispatch_error(error:)
-            reason = error.message.to_s[0, 512]
             kind = classify_dispatch_error(error: error)
-            Legion::Extensions::Llm::Routing::ProviderOutcome.new(
-              kind: kind, reason: reason.empty? ? 'unknown dispatch error' : reason
-            )
+            reason = error.class.name
+            reason = 'UnknownError' if reason.nil? || reason.empty?
+            Legion::Extensions::Llm::Routing::ProviderOutcome.new(kind: kind, reason: reason)
           end
 
           private

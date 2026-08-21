@@ -9,6 +9,13 @@ module Legion
             # D14 display-only health + capabilities writes to settings, made
             # AFTER each registry commit. Routing authority stays in the
             # in-memory AvailabilityFact; this is visibility for the status API.
+            #
+            # V14: the projection is the AvailabilityFact's OWN vocabulary.
+            # The pre-SSOT 4-key circuit shape (circuit_state/denied/
+            # available/adjustment) is deleted: adjustment is a routing-dial
+            # value that has no business in the live settings tree, and
+            # :initializing is not :half_open (the AvailabilityFact has no
+            # half-open state).
             module HealthDisplay
               def write_instance_health(state)
                 instance_key = state[:instance_key]
@@ -75,28 +82,16 @@ module Legion
                 }
               end
 
-              # Legacy 4-key health shape (circuit_state/denied/available/
-              # adjustment) plus display-only reason/observed_at/last_probe_
-              # outcome/source so the status API output matches pre-SSOT.
+              # The AvailabilityFact's own fields — no circuit-dial
+              # projection (V14).
               def health_hash(fact)
                 {
-                  circuit_state: circuit_state_for(fact[:state]),
-                  denied: false,
-                  available: fact[:state] != :unavailable,
-                  adjustment: fact[:state] == :available ? 0 : -50,
+                  state: fact[:state],
                   reason: fact[:reason],
                   observed_at: fact[:observed_at]&.iso8601,
                   last_probe_outcome: fact[:last_probe_outcome],
                   source: fact[:source]
                 }
-              end
-
-              def circuit_state_for(state)
-                case state
-                when :available then :closed
-                when :unavailable then :open
-                else :half_open
-                end
               end
             end
           end

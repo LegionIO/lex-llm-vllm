@@ -11,6 +11,15 @@ module Legion
       module Vllm
         module Runners
           module DiscoveryRefresh
+            # V3: a FAILED /v1/models fetch is not a catalog fact. The
+            # reconcile paths (replace on an active instance, re-activation
+            # of an :initializing one) must keep the last good snapshot when
+            # a fetch fails — publishing a replacement built from a failed
+            # observation evaporates a live instance's lanes for up to one
+            # discovery cycle. A successful fetch that returns an empty
+            # catalog IS a fact (the provider said so) and publishes as such.
+            class CatalogFetchFailure < StandardError; end
+
             # Offering discovery, health probing, and instance-identity helpers
             # for the vLLM discovery runner. Mixed into DiscoveryRefresh.
             module Http
@@ -29,18 +38,25 @@ module Legion
                 end
               rescue StandardError => e
                 raise e if discovery_programming_error?(e)
+                raise e if e.is_a?(CatalogFetchFailure)
 
-                # Network/runtime/parse errors (Faraday, timeout, JSON,
-                # malformed model data) mean the instance has no catalog right
-                # now — an empty set is the correct availability fact.
-                handle_exception(e, level: :warn, operation: 'vllm.runner.discovery.discover_offerings')
-                []
+                # Network/runtime/parse errors mean the fetch FAILED — not
+                # that the catalog is empty (V3). The failure is a typed,
+                # visible fact the reconcile paths act on (skip); the
+                # silent empty-set return is deleted.
+                handle_exception(e, level: :warn, handled: false,
+                                    operation: 'vllm.runner.discovery.discover_offerings')
+                raise CatalogFetchFailure, "vLLM catalog fetch failed (#{e.class.name})", cause: e
               end
 
               def fetch_models(instance_cfg:)
                 base_url = normalize_api_base(instance_cfg[:vllm_api_base] || instance_cfg[:endpoint])
                 conn = build_catalog_connection(base_url: base_url, instance_cfg: instance_cfg)
-                Legion::JSON.load(conn.get('/v1/models').body).fetch(:data, [])
+                response = conn.get('/v1/models')
+                raise CatalogFetchFailure, "vLLM /v1/models returned HTTP #{response.status}" \
+                  unless response.status.between?(200, 299)
+
+                Legion::JSON.load(response.body).fetch(:data, [])
               end
 
               # ── Health check (non-inference readiness) ─────────────────────
@@ -52,18 +68,18 @@ module Legion
                 Legion::Extensions::Llm::Inventory::ReadinessResult.new(
                   ready: response.status == 200,
                   reason: "vLLM /health returned #{response.status}",
-                  metadata: { status: response.status, base_url: base_url }
+                  metadata: { status: response.status }
                 )
               rescue Faraday::ConnectionFailed => e
                 handle_exception(e, level: :warn, handled: true, operation: 'vllm.runner.discovery.health',
                                     base_url: base_url)
-                readiness_failure(reason: "vLLM /health connection failed: #{e.message}", error: e)
+                readiness_failure(error: e)
               rescue StandardError => e
                 raise e if discovery_programming_error?(e)
 
                 handle_exception(e, level: :warn, handled: true, operation: 'vllm.runner.discovery.health',
                                     base_url: base_url)
-                readiness_failure(reason: "vLLM /health error: #{e.message}", error: e)
+                readiness_failure(error: e)
               end
 
               # D16: a programming bug in the discovery path must fail loud —
@@ -74,9 +90,15 @@ module Legion
                 error.is_a?(NameError) || error.is_a?(ArgumentError)
               end
 
-              def readiness_failure(reason:, error:)
+              # V8: the ReadinessResult contract carries no exception and no
+              # endpoint. The reason is a bounded fact (class name) — never
+              # an exception message (Faraday messages embed endpoint URLs),
+              # and the endpoint itself never enters registry-published
+              # metadata (status class only).
+              def readiness_failure(error:)
                 Legion::Extensions::Llm::Inventory::ReadinessResult.new(
-                  ready: false, reason: reason,
+                  ready: false,
+                  reason: "vLLM /health failed (#{error.class.name})",
                   metadata: { error_class: error.class.name }
                 )
               end

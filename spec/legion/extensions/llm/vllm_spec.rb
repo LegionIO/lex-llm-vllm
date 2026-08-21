@@ -3,19 +3,29 @@
 require 'spec_helper'
 
 RSpec.describe Legion::Extensions::Llm::Vllm do
-  let(:provider) { described_class::Provider.new(Legion::Extensions::Llm.config) }
+  # V6: a provider is only executable with its OWN explicit endpoint —
+  # the test provider carries one, as every production instance config does.
+  let(:provider) { described_class::Provider.new(vllm_api_base: 'http://localhost:8000') }
   let(:model) { Legion::Extensions::Llm::Model::Info.new(id: 'meta-llama/Llama-3.1-8B-Instruct', provider: :vllm) }
   let(:registry_publisher) { instance_double(Legion::Extensions::Llm::RegistryPublisher) }
 
-  it 'exposes simple provider defaults with thinking enabled' do
+  it 'exposes simple provider defaults' do
     settings = described_class.default_settings
     instance = settings.dig(:instances, :default)
 
     expect(settings[:enabled]).to be true
     expect(settings[:provider_family]).to eq(:vllm)
     expect(instance[:endpoint]).to eq('http://localhost:8000')
-    expect(instance[:enable_thinking]).to be true
     expect(instance.dig(:fleet, :respond_to_requests)).to be false
+  end
+
+  # V2: no enable_thinking default ships — a shipped config dial is a second
+  # thinking authority (it would execute thinking the canonical request did
+  # not ask for) and contradicts the :unknown thinking publication.
+  it 'ships no enable_thinking default in the instance template' do
+    instance = described_class.default_settings.dig(:instances, :default)
+
+    expect(instance).not_to have_key(:enable_thinking)
   end
 
   it 'does not register on the deprecated Provider.register registry' do
@@ -52,23 +62,31 @@ RSpec.describe Legion::Extensions::Llm::Vllm do
     expect(payload[:messages]).to eq([{ role: 'user', content: 'hello' }])
   end
 
-  it 'uses provider instance thinking settings when rendering chat payloads' do
+  # V2: the instance config is no longer a thinking authority — a silent
+  # canonical request renders a silent wire even on a config that sets
+  # enable_thinking (the dial no longer exists; the key is inert).
+  it 'renders no thinking kwargs for a silent canonical request regardless of config' do
     configured = described_class::Provider.new(vllm_api_base: 'http://localhost:8000', enable_thinking: true)
     message = Legion::Extensions::Llm::Canonical::Message.build(role: :user, content: 'hello')
 
     payload = configured.send(:render_payload, [message], tools: {}, params: nil, model: model, stream: false,
                                                           schema: nil, thinking: nil, tool_prefs: nil)
 
-    expect(payload[:chat_template_kwargs]).to eq(enable_thinking: true)
+    expect(payload).not_to have_key(:chat_template_kwargs)
+  end
+
+  # V6: an endpoint-less instance is unexecutable — construction fails
+  # through the base ensure_configured! contract; no localhost or
+  # sibling-endpoint fallback exists.
+  it 'raises at construction when the instance has no explicit endpoint' do
+    expect { described_class::Provider.new(tier: :local) }
+      .to raise_error(Legion::Extensions::Llm::ConfigurationError, /vllm_api_base/)
   end
 
   it 'uses an optional bearer token when configured' do
-    original = Legion::Extensions::Llm.config.vllm_api_key
-    Legion::Extensions::Llm.config.vllm_api_key = 'token-abc123'
+    tokened = described_class::Provider.new(vllm_api_base: 'http://localhost:8000', vllm_api_key: 'token-abc123')
 
-    expect(provider.headers).to eq('Authorization' => 'Bearer token-abc123')
-  ensure
-    Legion::Extensions::Llm.config.vllm_api_key = original
+    expect(tokened.headers).to eq('Authorization' => 'Bearer token-abc123')
   end
 
   it 'maps discovered models with context_length from max_model_len' do
@@ -77,6 +95,32 @@ RSpec.describe Legion::Extensions::Llm::Vllm do
 
     expect(models.first.capabilities).to eq([:streaming])
     expect(models.first.context_length).to eq(131_072)
+  end
+
+  # V7: catalog capabilities are derived per model — the same model-type
+  # split the production OfferingBuilder publishes (an embedding model is
+  # not a streaming chat model, and vice versa).
+  it 'maps an embedding model to the embeddings capability, not streaming' do
+    body = { 'data' => [{ 'id' => 'BAAI/bge-large-en-v1.5', 'type' => 'embedding', 'max_model_len' => 512 }] }
+    models = provider.send(:parse_list_models_response, fake_response(body), :vllm,
+                           described_class::Provider.capabilities)
+
+    expect(models.first.capabilities).to include(:embeddings)
+    expect(models.first.capabilities).not_to include(:streaming)
+  end
+
+  # V15: a block-shaped system prompt is not representable on the vLLM
+  # dialect — it fails at the edge instead of vanishing.
+  it 'raises when the system message content is not a plain String' do
+    system_blocks = Legion::Extensions::Llm::Canonical::Message.build(
+      role: :system, content: [{ type: 'text', text: 'be brief' }]
+    )
+    user = Legion::Extensions::Llm::Canonical::Message.build(role: :user, content: 'hello')
+    model = Legion::Extensions::Llm::Model::Info.new(id: 'gemma-4-31b-it', provider: :vllm)
+
+    expect do
+      provider.send(:render_payload, [system_blocks, user], tools: {}, params: nil, model: model, stream: false, schema: nil, thinking: nil, tool_prefs: nil)
+    end.to raise_error(ArgumentError, /system prompt must be a plain String/)
   end
 
   it 'publishes live readiness metadata asynchronously through the registry publisher' do
@@ -183,6 +227,23 @@ RSpec.describe Legion::Extensions::Llm::Vllm do
   describe '.discover_instances' do
     def stub_vllm_instances(value)
       allow(described_class).to receive(:settings).and_return({ instances: value })
+    end
+
+    # V13: NO stub — the module-level settings read resolves through the
+    # explicit Legion::Settings::Helper extension to the genuine
+    # [:extensions][:llm][:vllm] tree (loader injection is not a dependency).
+    it 'resolves settings from the genuine settings tree without stubbing' do
+      original_llm = Legion::Settings[:extensions][:llm]
+      Legion::Settings[:extensions][:llm] = {
+        vllm: { instances: { apollo: { vllm_api_base: 'http://apollo:8000' } } }
+      }
+
+      instances = described_class.discover_instances
+
+      expect(instances.keys).to eq([:apollo])
+      expect(instances[:apollo]).to include(vllm_api_base: 'http://apollo:8000', tier: :direct)
+    ensure
+      Legion::Settings[:extensions][:llm] = original_llm
     end
 
     it 'returns configured instances from extension settings' do

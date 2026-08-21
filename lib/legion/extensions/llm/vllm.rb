@@ -5,6 +5,7 @@ require 'legion/extensions/llm/vllm/translator'
 require 'legion/extensions/llm/vllm/provider'
 require 'legion/extensions/llm/vllm/version'
 require 'legion/logging'
+require 'legion/settings'
 
 module Legion
   module Extensions
@@ -12,6 +13,11 @@ module Legion
       # Vllm provider extension namespace.
       module Vllm
         extend Legion::Logging::Helper
+        # V13: the module-level `settings` read in discover_instances is an
+        # explicit named dependency (Legion::Settings::Helper, resolving to
+        # [:extensions][:llm][:vllm] from this namespace) — not a value the
+        # Legion extension loader happens to inject.
+        extend Legion::Settings::Helper
         extend Legion::Extensions::Llm::AutoRegistration
 
         PROVIDER_FAMILY = :vllm
@@ -25,7 +31,9 @@ module Legion
               tier: :direct,
               transport: :http,
               credentials: { api_key: nil },
-              enable_thinking: true,
+              # V2: no enable_thinking default — thinking intent is the
+              # canonical request's fact; a shipped config dial is a second
+              # authority and a publication/execution contradiction.
               usage: { inference: true, embedding: true, image: true },
               limits: { concurrency: 1 },
               fleet: {

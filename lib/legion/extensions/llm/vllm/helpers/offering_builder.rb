@@ -2,6 +2,7 @@
 
 require 'legion/extensions/llm/inventory/evidence'
 require 'legion/extensions/llm/inventory/weight_reconciler'
+require 'legion/extensions/llm/vllm/provider'
 
 module Legion
   module Extensions
@@ -52,9 +53,11 @@ module Legion
 
             attr_reader :instance_cfg, :instance_key
 
+            # V7: the one model-type predicate — shared with the legacy
+            # catalog path (Provider::Capabilities) so both publication
+            # surfaces derive the same fact.
             def embedding_supported?(model_data)
-              model_data[:type].to_s == 'embedding' ||
-                (model_data[:capabilities].is_a?(Array) && model_data[:capabilities].include?('embedding'))
+              Legion::Extensions::Llm::Vllm::Provider::Capabilities.embedding_model?(model_data)
             end
 
             def build_metadata(model_data)
@@ -159,13 +162,13 @@ module Legion
             end
 
             # Thinking support is a per-model chat-template fact that the vLLM
-            # model catalog does not expose, and a config permission is not
-            # evidence (SSOT v3 tri-state contract), so it stays unknown in
-            # every configuration.
-            def thinking_capability_evidence(cap, model_id)
-              entry = explicit_config_entry(:enable_thinking, model_id)
-              source = entry ? entry[:source] : :default_false
-              cap.call(capability: :thinking, status: :unknown, source: source)
+            # model catalog does not expose, so it stays :unknown in every
+            # configuration. V2: the enable_thinking config dial is deleted
+            # (it no longer influences execution), so a config gate can no
+            # longer source the evidence — the source is :default_false
+            # unconditionally.
+            def thinking_capability_evidence(cap, _model_id)
+              cap.call(capability: :thinking, status: :unknown, source: :default_false)
             end
 
             # Explicit gate value from the per-model config, falling back to

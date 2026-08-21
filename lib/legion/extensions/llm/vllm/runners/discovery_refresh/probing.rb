@@ -18,7 +18,18 @@ module Legion
                   # D4: an instance that failed readiness at boot stays
                   # :initializing until a probe passes. readiness_succeeded is
                   # invalid on :initializing, so re-activation is the only path.
-                  offerings = fetch_offerings(instance_cfg: instance_cfg, instance_key: state[:instance_key])
+                  # V3: a failed catalog fetch is not a catalog fact — stay
+                  # :initializing and retry next tick; running readiness on a
+                  # failed observation would re-activate with zero offerings.
+                  begin
+                    offerings = fetch_offerings(instance_cfg: instance_cfg, instance_key: state[:instance_key])
+                  rescue CatalogFetchFailure
+                    log.debug do
+                      "vLLM discovery: catalog fetch failed for #{instance_id} — " \
+                        'staying :initializing, retrying next tick'
+                    end
+                    return
+                  end
                   perform_readiness(instance_id: instance_id, state: state, offerings: offerings)
                   return
                 end
@@ -28,7 +39,18 @@ module Legion
               end
 
               def replace_if_changed(instance_id:, state:, instance_cfg:)
-                new_offerings = fetch_offerings(instance_cfg: instance_cfg, instance_key: state[:instance_key])
+                begin
+                  new_offerings = fetch_offerings(instance_cfg: instance_cfg, instance_key: state[:instance_key])
+                rescue CatalogFetchFailure
+                  # V3: a failed observation never replaces authoritative
+                  # published state — keep the last good snapshot; the next
+                  # successful tick replaces it.
+                  log.debug do
+                    "vLLM discovery: catalog fetch failed for #{instance_id} — " \
+                      'keeping last published snapshot'
+                  end
+                  return
+                end
                 changed = reconcile_weight_snapshot(
                   instance_id: instance_id, state: state, discovered_offerings: new_offerings
                 )

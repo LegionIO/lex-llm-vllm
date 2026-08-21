@@ -67,23 +67,26 @@ RSpec.describe Legion::Extensions::Llm::Vllm::Helpers::OfferingBuilder do
   end
 
   describe 'thinking capability evidence' do
-    it 'stays :unknown when no config gate is set (config permission is not evidence)' do
+    it 'stays :unknown with default_false source (thinking is a per-model chat-template fact)' do
       evidence = cap(build({ tier: :direct }), :thinking)
       expect(evidence.status).to eq(:unknown)
       expect(evidence.source).to eq(:default_false)
     end
 
-    it 'stays :unknown with override source when the instance config sets the gate' do
+    # V2: the enable_thinking config dial is deleted — it no longer
+    # influences execution, so a config gate can no longer source the
+    # evidence. The source is :default_false in every configuration.
+    it 'stays :unknown with default_false source even when config sets enable_thinking' do
       evidence = cap(build({ tier: :direct, enable_thinking: true }), :thinking)
       expect(evidence.status).to eq(:unknown)
-      expect(evidence.source).to eq(:instance_override)
+      expect(evidence.source).to eq(:default_false)
     end
 
-    it 'stays :unknown with model-override source for a model-level gate' do
+    it 'stays :unknown with default_false source for a model-level gate' do
       cfg = { tier: :direct, models: { 'gemma-4-31b-it': { enable_thinking: true } } }
       evidence = cap(build(cfg), :thinking)
       expect(evidence.status).to eq(:unknown)
-      expect(evidence.source).to eq(:model_override)
+      expect(evidence.source).to eq(:default_false)
     end
   end
 
