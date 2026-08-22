@@ -5,11 +5,25 @@ require 'logger'
 require 'stringio'
 
 require 'legion/extensions/llm'
-
-require 'legion/extensions/llm/vllm'
-
 require 'legion/settings'
 require 'legion/logging'
+
+# Stub the actor runtime base class BEFORE loading the vllm gem: the gem's
+# actors/discovery requires the shared discovery actor, which only defines
+# the base when Legion::Extensions::Actors::Every exists (the real Every
+# requires the full LegionIO runtime). Defined here so the require inside
+# the gem load sees it — a later re-require would be a no-op.
+module Legion
+  module Extensions
+    module Actors
+      unless const_defined?(:Every, false)
+        class Every
+          def initialize(*_args) = nil
+        end
+      end
+    end
+  end
+end
 
 # Functional stand-in for the LegionIO `Legion::Extensions::Helpers::Lex`
 # helper, for vLLM specs. Provides the REAL settings/log/handle_exception the
@@ -38,6 +52,8 @@ module Legion
     end
   end
 end
+
+require 'legion/extensions/llm/vllm'
 
 # Load conformance kit from lex-llm gem's spec/ directory
 # (spec/ ships in the gem but is NOT on the load path). Skip lex-llm's own

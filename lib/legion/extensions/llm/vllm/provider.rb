@@ -173,22 +173,6 @@ module Legion
           def build_chunk(data)
             translator.parse_chunk(data)
           end
-
-          def parse_list_models_response(response, provider, capabilities)
-            response.body.fetch('data', []).map do |model|
-              critical_capabilities = critical_capabilities_for(capabilities, model)
-              Legion::Extensions::Llm::Model::Info.from_hash(
-                id: model.fetch('id'),
-                name: model['id'],
-                provider: provider,
-                created_at: model_created_at(model['created']),
-                context_length: model['max_model_len'],
-                capabilities: critical_capabilities,
-                modalities: modalities_for_capabilities(critical_capabilities),
-                metadata: model
-              )
-            end
-          end
         end
 
         # ── Provider class ────────────────────────────────────────────────────
@@ -217,16 +201,16 @@ module Legion
 
           # Capability predicates for vLLM OpenAI-compatible model
           # offerings. V7: per-model derivation — the same model-type split
-          # the production OfferingBuilder publishes: an embedding model
-          # does not serve chat or streaming, a chat model does not serve
-          # embeds. The static every-model-`streaming` claims are deleted.
+          # the discovery runner publishes: an embedding model does not serve
+          # chat or streaming, a chat model does not serve embeds. The static
+          # every-model-`streaming` claims are deleted.
           module Capabilities
             module_function
 
-            # The one model-type predicate, shared with
-            # Helpers::OfferingBuilder. The catalog path hands string-keyed
-            # wire hashes; the discovery path hands symbol-keyed JSON —
-            # both shapes resolve here.
+            # The one model-type predicate, shared with the discovery runner's
+            # build_offering_draft. The catalog path hands string-keyed wire
+            # hashes; the discovery path hands symbol-keyed JSON — both shapes
+            # resolve here.
             def embedding_model?(model)
               data = model.is_a?(Hash) ? model : {}
               type = data[:type] || data['type']
@@ -289,31 +273,6 @@ module Legion
           def health(live: false)
             log.info { "checking health live=#{live} at #{api_base}#{health_url}" }
             super
-          end
-
-          def readiness(live: false)
-            log.info { "checking readiness live=#{live} at #{api_base}" }
-            super.tap do |metadata|
-              registry_publisher.publish_readiness_async(metadata) if live
-            end
-          end
-
-          # M6: the instance identity is CARRIED — the operator's config name,
-          # the single config→id derivation (base provider_instance_id via
-          # Inventory::Identity). A nearby layer never derives identity; the
-          # gem-level identity-less publisher is deleted.
-          def registry_publisher
-            @registry_publisher ||= Legion::Extensions::Llm::RegistryPublisher.new(
-              provider_family: PROVIDER_FAMILY,
-              provider_instance: provider_instance_id
-            )
-          end
-
-          def list_models(live: false, **filters)
-            log.info { "discovering models from #{api_base}#{models_url}" }
-            super.tap do |models|
-              log.info { "discovered #{models.size} model(s) from vLLM" }
-            end
           end
         end
       end

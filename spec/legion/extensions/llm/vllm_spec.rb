@@ -1,13 +1,13 @@
 # frozen_string_literal: true
 
 require 'spec_helper'
+require 'legion/extensions/llm/vllm/runners/discovery'
 
 RSpec.describe Legion::Extensions::Llm::Vllm do
   # V6: a provider is only executable with its OWN explicit endpoint —
   # the test provider carries one, as every production instance config does.
   let(:provider) { described_class::Provider.new(vllm_api_base: 'http://localhost:8000') }
-  let(:model) { Legion::Extensions::Llm::Model::Info.new(id: 'meta-llama/Llama-3.1-8B-Instruct', provider: :vllm) }
-  let(:registry_publisher) { instance_double(Legion::Extensions::Llm::RegistryPublisher) }
+  let(:model) { 'meta-llama/Llama-3.1-8B-Instruct' }
 
   it 'exposes simple provider defaults' do
     settings = described_class.default_settings
@@ -89,26 +89,6 @@ RSpec.describe Legion::Extensions::Llm::Vllm do
     expect(tokened.headers).to eq('Authorization' => 'Bearer token-abc123')
   end
 
-  it 'maps discovered models with context_length from max_model_len' do
-    models = provider.send(:parse_list_models_response, fake_response(models_body), :vllm,
-                           described_class::Provider.capabilities)
-
-    expect(models.first.capabilities).to eq([:streaming])
-    expect(models.first.context_length).to eq(131_072)
-  end
-
-  # V7: catalog capabilities are derived per model — the same model-type
-  # split the production OfferingBuilder publishes (an embedding model is
-  # not a streaming chat model, and vice versa).
-  it 'maps an embedding model to the embeddings capability, not streaming' do
-    body = { 'data' => [{ 'id' => 'BAAI/bge-large-en-v1.5', 'type' => 'embedding', 'max_model_len' => 512 }] }
-    models = provider.send(:parse_list_models_response, fake_response(body), :vllm,
-                           described_class::Provider.capabilities)
-
-    expect(models.first.capabilities).to include(:embeddings)
-    expect(models.first.capabilities).not_to include(:streaming)
-  end
-
   # V15: a block-shaped system prompt is not representable on the vLLM
   # dialect — it fails at the edge instead of vanishing.
   it 'raises when the system message content is not a plain String' do
@@ -116,25 +96,15 @@ RSpec.describe Legion::Extensions::Llm::Vllm do
       role: :system, content: [{ type: 'text', text: 'be brief' }]
     )
     user = Legion::Extensions::Llm::Canonical::Message.build(role: :user, content: 'hello')
-    model = Legion::Extensions::Llm::Model::Info.new(id: 'gemma-4-31b-it', provider: :vllm)
+    model = 'gemma-4-31b-it'
 
     expect do
       provider.send(:render_payload, [system_blocks, user], tools: {}, params: nil, model: model, stream: false, schema: nil, thinking: nil, tool_prefs: nil)
     end.to raise_error(ArgumentError, /system prompt must be a plain String/)
   end
 
-  it 'publishes live readiness metadata asynchronously through the registry publisher' do
-    allow(provider).to receive(:registry_publisher).and_return(registry_publisher)
-    allow(provider.connection).to receive(:get).with('/health').and_return(fake_response({}))
-    allow(registry_publisher).to receive(:publish_readiness_async)
-
-    readiness = provider.readiness(live: true)
-
-    expect(registry_publisher).to have_received(:publish_readiness_async).with(readiness)
-  end
-
   # 0.8.0 (07 C5): the legacy ModelOffering production path is deleted — the
-  # per-gem writer (Runners::DiscoveryRefresh + Helpers::OfferingBuilder)
+  # per-gem writer (Runners::Discovery, the shared Discovery::Pipeline)
   # publishes OfferingDrafts; the base read path serves the activated
   # inventory offerings for this instance from the registry snapshot.
 
@@ -144,15 +114,13 @@ RSpec.describe Legion::Extensions::Llm::Vllm do
     )
     publisher = Legion::Extensions::Llm::Inventory::Publisher.new(provider_family: :vllm)
     coordinator = Legion::Extensions::Llm::Inventory::ProbeCoordinator.new(instance_key: key, enqueue: ->(**) { true })
-    callable = Legion::Extensions::Llm::Vllm::VllmCallable.new(
+    callable = Legion::Extensions::Llm::Vllm::Helpers::Callable.new(
       instance_cfg: { name: 'default', tier: :local }, logger: Logger.new(File::NULL)
     )
     token = publisher.claim_instance(instance_id: 'default', callable: callable, probe_request_handle: coordinator)
     probe = publisher.readiness_probe_started(instance_id: 'default', publisher_token: token)
-    builder = Legion::Extensions::Llm::Vllm::Helpers::OfferingBuilder.new(
-      instance_cfg: { name: 'default', tier: :local }, instance_key: key
-    )
-    draft = builder.build(
+    draft = described_class::Runners::Discovery.build_offering_draft(
+      instance_cfg: { name: 'default', tier: :local }, instance_key: key,
       model_id: 'meta-llama/Llama-3.1-8B-Instruct',
       model_data: { id: 'meta-llama/Llama-3.1-8B-Instruct', max_model_len: 131_072 }
     )
@@ -169,11 +137,16 @@ RSpec.describe Legion::Extensions::Llm::Vllm do
     Legion::Extensions::Llm::Inventory::Registry.reset!
   end
 
-  it 'never calls list_models on offerings reads — the production path moved to the per-gem writer' do
-    allow(provider).to receive(:list_models).and_raise('unexpected live discovery')
+  # H5 (0.8.0): the offerings read path performs NO transport — it is an
+  # in-memory snapshot lookup, and `live:` is accepted for signature
+  # compatibility only.
+  it 'performs no transport on offerings reads, even with live: true' do
+    connection = instance_spy(Legion::Extensions::Llm::Connection)
+    allow(provider).to receive(:connection).and_return(connection)
 
     expect { provider.discover_offerings(live: true) }.not_to raise_error
-    expect(provider).not_to have_received(:list_models)
+    expect(connection).not_to have_received(:get)
+    expect(connection).not_to have_received(:post)
   end
 
   it 'filters snapshot offerings by model and instance keys' do
@@ -182,15 +155,13 @@ RSpec.describe Legion::Extensions::Llm::Vllm do
     )
     publisher = Legion::Extensions::Llm::Inventory::Publisher.new(provider_family: :vllm)
     coordinator = Legion::Extensions::Llm::Inventory::ProbeCoordinator.new(instance_key: key, enqueue: ->(**) { true })
-    callable = Legion::Extensions::Llm::Vllm::VllmCallable.new(
+    callable = Legion::Extensions::Llm::Vllm::Helpers::Callable.new(
       instance_cfg: { name: 'default', tier: :local }, logger: Logger.new(File::NULL)
     )
     token = publisher.claim_instance(instance_id: 'default', callable: callable, probe_request_handle: coordinator)
     probe = publisher.readiness_probe_started(instance_id: 'default', publisher_token: token)
-    builder = Legion::Extensions::Llm::Vllm::Helpers::OfferingBuilder.new(
-      instance_cfg: { name: 'default', tier: :local }, instance_key: key
-    )
-    draft = builder.build(
+    draft = described_class::Runners::Discovery.build_offering_draft(
+      instance_cfg: { name: 'default', tier: :local }, instance_key: key,
       model_id: 'meta-llama/Llama-3.1-8B-Instruct',
       model_data: { id: 'meta-llama/Llama-3.1-8B-Instruct', max_model_len: 131_072 }
     )
@@ -203,25 +174,6 @@ RSpec.describe Legion::Extensions::Llm::Vllm do
     expect(provider.discover_offerings(instance: 'other-instance')).to be_empty
   ensure
     Legion::Extensions::Llm::Inventory::Registry.reset!
-  end
-
-  it 'builds sanitized lex-llm registry events for vLLM model availability' do
-    events = capture_registry_events([model], readiness: { ready: true })
-
-    expect(events.first.to_h).to include(event_type: :offering_available)
-    expect(events.first.to_h.dig(:offering, :provider_family)).to eq(:vllm)
-    expect(events.first.to_h.dig(:offering, :model)).to eq('meta-llama/Llama-3.1-8B-Instruct')
-  end
-
-  # M6: the publisher CARRIES the instance identity (the operator's config
-  # name via the base provider_instance_id) — the identity-less gem-level
-  # publisher is deleted.
-  it 'builds the registry publisher with the carried instance identity' do
-    publisher = provider.registry_publisher
-
-    expect(publisher).to be_a(Legion::Extensions::Llm::RegistryPublisher)
-    expect(publisher.provider_family).to eq(:vllm)
-    expect(publisher.provider_instance).to eq(provider.provider_instance_id)
   end
 
   describe '.discover_instances' do
@@ -293,6 +245,26 @@ RSpec.describe Legion::Extensions::Llm::Vllm do
 
       expect(instances.keys).to contain_exactly(:default, :apollo)
       expect(instances[:default]).to include(vllm_api_base: 'http://apollo-001:8000', tier: :direct)
+    end
+
+    # The shared Discovery::Pipeline reads discover_instances as the single
+    # claimable source — an operator's enabled: false is a skip, never a claim
+    # (a disabled instance would otherwise be claimed + published as a live lane).
+    it 'skips instances with enabled: false' do
+      stub_vllm_instances(
+        apollo: { vllm_api_base: 'http://apollo:8000' },
+        off: { vllm_api_base: 'http://off-node:8000', enabled: false }
+      )
+      instances = described_class.discover_instances
+
+      expect(instances.keys).to eq([:apollo])
+      expect(instances).not_to have_key(:off)
+    end
+
+    it 'keeps an instance with enabled: true in the claimable set' do
+      stub_vllm_instances({ apollo: { vllm_api_base: 'http://apollo:8000', enabled: true } })
+
+      expect(described_class.discover_instances.keys).to eq([:apollo])
     end
 
     # D3: an entry with no resolvable endpoint is unclaimable — skip it rather
@@ -381,23 +353,5 @@ RSpec.describe Legion::Extensions::Llm::Vllm do
   def management_urls
     [provider.health_url, provider.version_url, provider.reset_prefix_cache_url, provider.reset_mm_cache_url,
      provider.sleep_url, provider.wake_up_url]
-  end
-
-  def models_body
-    { 'data' => [{ 'id' => 'meta-llama/Llama-3.1-8B-Instruct', 'created' => 1, 'max_model_len' => 131_072 }] }
-  end
-
-  def fake_response(body)
-    Struct.new(:body).new(body)
-  end
-
-  def capture_registry_events(models, readiness:)
-    publisher = Legion::Extensions::Llm::RegistryPublisher.new(provider_family: :vllm, provider_instance: 'default')
-    events = []
-    allow(publisher).to receive(:publishing_available?).and_return(true)
-    allow(publisher).to receive(:publish_event) { |event| events << event }
-    allow(publisher).to receive(:schedule).and_yield
-    publisher.publish_models_async(models, readiness:)
-    events
   end
 end

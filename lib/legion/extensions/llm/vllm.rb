@@ -3,6 +3,8 @@
 require 'legion/extensions/llm'
 require 'legion/extensions/llm/vllm/translator'
 require 'legion/extensions/llm/vllm/provider'
+require 'legion/extensions/llm/vllm/helpers/callable'
+require 'legion/extensions/llm/vllm/actors/discovery'
 require 'legion/extensions/llm/vllm/version'
 require 'legion/logging'
 require 'legion/settings'
@@ -55,6 +57,12 @@ module Legion
           if configured.is_a?(Hash)
             configured.each do |name, config|
               normalized = normalize_instance_config(config)
+
+              # enabled: false is a skip, not a claimable instance: the shared
+              # Discovery::Pipeline reads this method as the single claimable
+              # source and would otherwise claim + publish a disabled instance
+              # as a live lane (an operator's enabled: false is user-space intent).
+              next if normalized[:enabled] == false
 
               next if normalized[:vllm_api_base].to_s.strip.empty?
 
