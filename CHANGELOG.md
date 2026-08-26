@@ -1,15 +1,5 @@
 # Changelog
 
-## [0.4.9] - 2026-08-25
-
-### Fixed
-- **Tool call no longer silently dropped on imperfect arguments (canary regression).** `parse_tool_calls`
-  handed `function.arguments` to the strict `ToolArguments.parse!` with no rescue, so a non-object /
-  degraded / already-decoded arguments payload (which qwen-family models emit in varying shapes
-  run-to-run) raised and lost the entire tool call — surfacing to the client as if the model had
-  narrated instead of calling. The tool CALL is now preserved: a Hash payload passes through, and an
-  unparseable/non-object payload logs loudly and defaults to `{}` rather than dropping the call.
-
 ## [0.4.8] - 2026-08-25
 
 ### Changed

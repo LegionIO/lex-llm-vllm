@@ -233,43 +233,6 @@ RSpec.describe Legion::Extensions::Llm::Vllm::Translator do
       end
     end
 
-    # Structured tool_calls resilience: the tool CALL is the essential fact.
-    # vLLM/qwen return arguments in varying shapes run-to-run; a non-object or
-    # already-decoded payload must NOT silently drop the call (that regression
-    # surfaced as the model appearing to "narrate" instead of calling on the
-    # canary). The call is preserved with best-effort arguments.
-    context 'with a structured tool call (finish_reason tool_calls)' do
-      def structured_wire(arguments)
-        {
-          'choices' => [{
-            'message' => { 'content' => nil,
-                           'tool_calls' => [{ 'id' => 'call_1', 'type' => 'function',
-                                              'function' => { 'name' => 'legion_list_all_tools', 'arguments' => arguments } }] },
-            'finish_reason' => 'tool_calls'
-          }],
-          'usage' => { 'prompt_tokens' => 3, 'completion_tokens' => 8 }
-        }
-      end
-
-      it 'preserves the call when arguments are a valid JSON-object string' do
-        result = translator.parse_response(structured_wire('{}'))
-        expect(result.tool_calls.map(&:name)).to eq(['legion_list_all_tools'])
-        expect(result.tool_calls.first.arguments).to eq({})
-      end
-
-      it 'preserves the call with {} when arguments are a non-object JSON string (never dropped)' do
-        result = translator.parse_response(structured_wire('null'))
-        expect(result.tool_calls.map(&:name)).to eq(['legion_list_all_tools'])
-        expect(result.tool_calls.first.arguments).to eq({})
-      end
-
-      it 'passes through already-decoded Hash arguments' do
-        result = translator.parse_response(structured_wire({ 'city' => 'SF' }))
-        expect(result.tool_calls.map(&:name)).to eq(['legion_list_all_tools'])
-        expect(result.tool_calls.first.arguments).to eq('city' => 'SF')
-      end
-    end
-
     # V16: a non-completion body is a transport/contract fault — it fails
     # loud instead of completing the call with a successful :error response.
     context 'with a non-completion body (V16)' do
