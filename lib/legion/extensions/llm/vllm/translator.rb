@@ -2,6 +2,7 @@
 
 require 'legion/extensions/llm/canonical'
 require 'legion/extensions/llm/responses/thinking_extractor'
+require 'legion/extensions/llm/responses/tool_arguments'
 require 'legion/extensions/llm/stop_reason_mapping'
 require 'legion/json'
 require 'legion/logging'
@@ -42,16 +43,18 @@ module Legion
             }.compact.reject { |k, v| k == :name && (v.nil? || v.to_s.empty?) }
           end
 
+          # V11: the message boundary is strict (Canonical::Message.
+          # normalize_content!: String | ContentBlock | Array<ContentBlock>
+          # | nil) — the Hash poison-repair branch and the to_s catch-all
+          # are deleted. A non-canonical shape is a contract error, not
+          # data to repair.
           def format_message_content(msg)
             content = msg.content
             return content if content.is_a?(String) && !content.empty?
+            return format_content_blocks(content) if content.is_a?(Array)
+            return format_content_blocks([content]) if content.is_a?(Canonical::ContentBlock)
 
-            case content
-            when Array then format_content_blocks(content)
-            when Canonical::ContentBlock then format_content_blocks([content])
-            when Hash then format_content_blocks_from_hash(content)
-            else content&.to_s
-            end
+            nil
           end
 
           def format_content_blocks(blocks)
@@ -60,13 +63,10 @@ module Legion
           end
 
           def coerce_content_block(block)
-            if block.is_a?(Canonical::ContentBlock)
-              format_content_block(block)
-            elsif block.is_a?(Hash)
-              format_content_block_from_hash(block)
-            else
-              { type: 'text', text: block.to_s }
-            end
+            return format_content_block(block) if block.is_a?(Canonical::ContentBlock)
+
+            raise ArgumentError,
+                  "vllm.translator: content block must be Canonical::ContentBlock, got #{block.class}"
           end
 
           def format_content_block(block)
@@ -74,31 +74,6 @@ module Legion
             when :tool_use then { type: 'text', text: Legion::JSON.generate(block.input || {}) }
             when :image    then build_image_block(block)
             else                { type: 'text', text: block.text.to_s }
-            end
-          end
-
-          def format_content_blocks_from_hash(hash_input)
-            case hash_input
-            when Hash  then [format_content_block_from_hash(hash_input)]
-            when Array then hash_input.map { |hsh| format_content_block_from_hash(hsh) }
-            else            []
-            end
-          end
-
-          def format_content_block_from_hash(block_hash)
-            attrs = block_hash.transform_keys(&:to_sym)
-            type = (attrs[:type] || :text).to_sym
-            format_block_hash_by_type(type, attrs)
-          end
-
-          def format_block_hash_by_type(type, attrs)
-            case type
-            when :tool_use
-              { type: 'text', text: Legion::JSON.generate(attrs[:input] || {}) }
-            when :image, :image_url
-              { type: 'image_url', image_url: { url: attrs[:data] || attrs[:url] || '' } }
-            else
-              { type: 'text', text: attrs[:text].to_s }
             end
           end
 
@@ -120,36 +95,26 @@ module Legion
         module TranslatorToolCallHelpers
           private
 
+          # V11: message tool_calls are Array<Canonical::ToolCall> (the
+          # canonical contract) — the Hash-shape repair branch is deleted.
           def format_message_tool_calls(tool_calls)
             return [] if tool_calls.empty?
 
-            tc_array = tool_calls.is_a?(Hash) ? tool_calls.values : Array(tool_calls)
-            tc_array.map { |tce| format_tool_call_for_history(tce) }
+            tool_calls.map { |tce| format_tool_call_for_history(tce) }
           end
 
           def format_tool_call_for_history(tool_call_entry)
-            hash = coerce_tool_call_to_hash(tool_call_entry)
-            name = hash[:name] || hash['name']
-            id   = hash[:id]   || hash['id']
-            args = serialize_tool_args(hash)
-            { id: id.to_s, type: 'function', function: { name: name.to_s, arguments: args } }
+            tool_call = coerce_tool_call_to_history(tool_call_entry)
+            args = tool_call.arguments || {}
+            { id: tool_call.id.to_s, type: 'function',
+              function: { name: tool_call.name.to_s, arguments: Legion::JSON.generate(args) } }
           end
 
-          def coerce_tool_call_to_hash(entry)
-            case entry
-            when Canonical::ToolCall then canonical_tool_call_to_hash(entry)
-            when Hash                then entry.transform_keys(&:to_sym)
-            else                          entry
-            end
-          end
+          def coerce_tool_call_to_history(entry)
+            return entry if entry.is_a?(Canonical::ToolCall)
 
-          def canonical_tool_call_to_hash(tool_call)
-            { name: tool_call&.name&.to_s, id: tool_call&.id&.to_s, arguments: tool_call&.arguments || {} }
-          end
-
-          def serialize_tool_args(hash)
-            args = hash[:arguments] || hash['arguments'] || {}
-            args.is_a?(Hash) ? Legion::JSON.generate(args) : args.to_s
+            raise ArgumentError,
+                  "vllm.translator: history tool call must be Canonical::ToolCall, got #{entry.class}"
           end
         end
 
@@ -159,6 +124,11 @@ module Legion
         module TranslatorToolHelpers
           private
 
+          # V11: the tools boundary is strict (Hash<name,
+          # Canonical::ToolDefinition> — enforced at the funnel by H3,
+          # normalized by Canonical::Request) — the gem's own Hash-tolerant
+          # schema extraction is deleted in favor of the shared strict
+          # normalize_parameters.
           def format_tools(tools)
             return [] if tools.to_h.empty?
 
@@ -166,27 +136,19 @@ module Legion
           end
 
           def format_single_tool(tool)
-            hash = normalize_tool_to_hash(tool)
-            name = hash[:name] || hash['name']
-            description = (hash[:description] || hash['description'] || '').to_s
-            parameters = resolve_tool_parameters(hash)
-            { type: 'function', function: { name: name.to_s, description: description, parameters: parameters } }
+            definition = coerce_tool_definition(tool)
+            parameters = Legion::Extensions::Llm::Canonical::ToolDefinition
+                         .normalize_parameters(definition.parameters)
+            { type: 'function',
+              function: { name: definition.name.to_s, description: definition.description,
+                          parameters: parameters } }
           end
 
-          def normalize_tool_to_hash(tool)
-            if tool.is_a?(Canonical::ToolDefinition)
-              { name: tool.name, description: tool.description, parameters: tool.parameters }
-            elsif tool.is_a?(Hash)
-              tool.transform_keys(&:to_sym)
-            else
-              tool
-            end
-          end
+          def coerce_tool_definition(tool)
+            return tool if tool.is_a?(Canonical::ToolDefinition)
 
-          def resolve_tool_parameters(hash)
-            raw = hash[:parameters] || hash[:input_schema]
-            raw = raw.to_h if raw.respond_to?(:to_h) && !raw.is_a?(Hash)
-            Legion::Extensions::Llm::Canonical::ToolDefinition.normalize_parameters(raw)
+            raise ArgumentError,
+                  "vllm.translator: tool must be Canonical::ToolDefinition, got #{tool.class}"
           end
 
           def format_tool_choice(choice)
@@ -232,12 +194,18 @@ module Legion
 
           private
 
-          def map_params_to_wire(params)
-            return {} unless params.is_a?(Canonical::Params)
+          # V11: the request boundary is strict (Canonical::Request.
+          # normalize_params! — params is Canonical::Params or nil, nil
+          # handled by the caller). A poison type silently rendering a
+          # ZERO-param request (max_tokens/temperature/seed all dropped)
+          # is a contract error, not a render path.
+          def map_params_to_wire(params, **)
+            unless params.is_a?(Canonical::Params)
+              raise ArgumentError,
+                    "vllm.translator: params must be Canonical::Params, got #{params.class}"
+            end
 
-            wire = build_supported_params_wire(params)
-            log_unsupported_params(params)
-            wire
+            build_supported_params_wire(params)
           end
 
           def build_supported_params_wire(params)
@@ -254,15 +222,6 @@ module Legion
             when :stop_sequences  then format_stop_sequences(value)
             when :response_format then format_response_format_value(value)
             else value
-            end
-          end
-
-          def log_unsupported_params(params)
-            return unless params.max_thinking_tokens
-
-            log.debug do
-              'vLLM translator dropping unsupported params: max_thinking_tokens ' \
-                '(handled via vLLM-specific render paths)'
             end
           end
 
@@ -307,66 +266,51 @@ module Legion
 
         # ── Thinking configuration helpers ────────────────────────────────────
 
-        # Applies thinking/reasoning config to vLLM wire payloads.
+        # Renders the canonical thinking state to the vLLM wire (V2).
+        # The canonical request is the SOLE authority on thinking intent
+        # (R4). A nil thinking config renders a silent wire; enabled: false
+        # renders enable_thinking:false (forcing a default-ON model off);
+        # enabled: true renders enable_thinking:true plus the resolved budget
+        # as the dialect's documented thinking_budget. The budget axis consults
+        # Thinking::Config#resolved_budget (the cross-axis derivation the
+        # canonical config exists for) — there is no params dual-home.
         module TranslatorThinkingHelpers
           private
 
-          def apply_thinking_config(payload, request)
-            return unless enable_thinking?(request)
+          def apply_thinking_config(payload, request, **)
+            thinking = request.thinking
+            return unless thinking.is_a?(Canonical::Thinking::Config)
 
-            payload[:chat_template_kwargs] = { enable_thinking: true }
-            budget = request.params&.max_thinking_tokens
-            return unless budget&.positive?
+            unless thinking.enabled
+              payload[:chat_template_kwargs] = { enable_thinking: false }
+              return
+            end
 
-            log.debug { "vLLM translator thinking max_thinking_tokens=#{budget} via chat template" }
-          end
+            kwargs = { enable_thinking: true }
+            budget = thinking.resolved_budget
+            kwargs[:thinking_budget] = budget if budget&.positive?
 
-          def enable_thinking?(request)
-            return true if thinking_object_enabled?(request.thinking)
-            return true if thinking_hash_enabled?(request.thinking)
-            return config_thinking_on? if request.thinking.nil?
-
-            false
-          end
-
-          def thinking_object_enabled?(thinking)
-            thinking.is_a?(Canonical::Thinking::Config) && thinking.enabled?
-          end
-
-          def thinking_hash_enabled?(thinking)
-            thinking.is_a?(Hash) && (thinking[:enabled] != false)
-          end
-
-          def config_thinking_on?
-            return false unless config
-
-            config_thinking_enabled?
-          end
-
-          def config_thinking_enabled?
-            val = config.respond_to?(:enable_thinking) ? config.enable_thinking : config_bracket_thinking
-            val == true
-          end
-
-          def config_bracket_thinking
-            config.respond_to?(:[]) ? config[:enable_thinking] : nil
+            payload[:chat_template_kwargs] = kwargs
+            log.debug do
+              'vLLM translator thinking via chat_template_kwargs ' \
+                "enable_thinking=true budget=#{kwargs[:thinking_budget].inspect}"
+            end
           end
         end
 
         # ── Tool-call parsing helpers ─────────────────────────────────────────
 
-        # Parses wire tool-call payloads and synthesizes tool calls from text content.
+        # Parses wire tool-call payloads and synthesizes tool calls from
+        # text content (the declared tool_calls_as_text quirk — some
+        # vLLM-served models emit tool calls as JSON text).
+        #
+        # V4: attribution is not a fact a provider response can know —
+        # response tool calls carry source: nil. The executor resolves the
+        # execution authority by tool NAME from the request's tool map and
+        # stamps the actual source at execution; stamping :client on every
+        # response call was a reconstructed attribution fact.
         module TranslatorToolCallParseHelpers
           private
-
-          def parse_tool_arguments(arguments)
-            return {} if arguments.nil? || arguments == ''
-            return arguments if arguments.is_a?(Hash)
-
-            Legion::JSON.load(arguments)
-          rescue Legion::JSON::ParseError
-            {}
-          end
 
           def synthesize_tool_calls_from_content(content, _message)
             return [] unless content.is_a?(String) && !content.empty?
@@ -388,18 +332,20 @@ module Legion
             name = parsed[:name] || parsed[:function_name]
             return nil if name.nil? || name.to_s.empty?
 
-            args = resolve_tool_args(parsed)
-            Canonical::ToolCall.build(name: name.to_s, arguments: args, source: :client)
+            Canonical::ToolCall.build(name: name.to_s, arguments: resolve_tool_args(parsed))
           rescue Legion::JSON::ParseError
             nil
           end
 
+          # V4: unparseable arguments fail the call — the same strict
+          # policy as the structured sync path (ToolArguments.parse!).
+          # The rescued-into-fabricated-{} policy is deleted: an
+          # empty-argument tool execution is worse than a loud failure.
           def resolve_tool_args(parsed)
             raw = parsed[:arguments] || parsed[:parameters] || parsed[:input] || {}
-            raw = Legion::JSON.load(raw) if raw.is_a?(String)
-            raw.is_a?(Hash) ? raw : {}
-          rescue Legion::JSON::ParseError
-            {}
+            return raw if raw.is_a?(Hash)
+
+            Legion::Extensions::Llm::Responses::ToolArguments.parse!(raw)
           end
         end
 
@@ -408,17 +354,6 @@ module Legion
         # Parses vLLM/OpenAI-compatible completion responses into Canonical::Response.
         module TranslatorResponseHelpers
           private
-
-          def canonical_error_response(wire)
-            body = wire.is_a?(Hash) ? wire : {}
-            error_info = body['error'] || { type: 'parse_error', message: 'Failed to parse response' }
-            Canonical::Response.build(
-              text: '', tool_calls: [],
-              usage: Canonical::Usage.from_hash(body['usage'] || {}),
-              stop_reason: :error, model: body['model'],
-              metadata: { error: error_info }
-            )
-          end
 
           def extract_thinking_metadata(message)
             {
@@ -431,10 +366,13 @@ module Legion
             }.compact
           end
 
+          # V1: the shared strict factory — the raw Data#new bypass is
+          # deleted (under the H1 strict constructor it was also a latent
+          # missing-keyword crash: metadata has no default).
           def build_canonical_thinking(extraction)
             return nil unless extraction.thinking || extraction.signature
 
-            Canonical::Thinking.new(content: extraction.thinking, signature: extraction.signature)
+            Canonical::Thinking.build(content: extraction.thinking, signature: extraction.signature)
           end
 
           def resolve_tool_calls(extraction, message)
@@ -446,19 +384,22 @@ module Legion
             tool_calls
           end
 
+          # Sync tool calls: the ONE strict arguments parser (10 U2). Invalid
+          # or non-object JSON is a contract error that stays visible (04 L7,
+          # 08 E4) — never rescued into a fabricated empty call. V4: no
+          # source stamp — attribution is the executor's fact, not the
+          # provider's.
           def parse_tool_calls(tool_calls)
             return [] unless tool_calls.is_a?(Array) && !tool_calls.empty?
 
-            tool_calls.filter_map do |call|
+            tool_calls.map do |call|
               function = call.fetch('function', {})
               name = function['name']
               id = call['id'] || name || call['index']
-              Canonical::ToolCall.build(id: id.to_s, name: name.to_s,
-                                        arguments: parse_tool_arguments(function['arguments']),
-                                        source: :client)
-            rescue StandardError => e
-              handle_exception(e, level: :warn, handled: true, operation: 'vllm.translator.parse_tool_call')
-              nil
+              Canonical::ToolCall.build(
+                id: id.to_s, name: name.to_s,
+                arguments: Responses::ToolArguments.parse!(function['arguments'])
+              )
             end
           end
 
@@ -471,6 +412,40 @@ module Legion
               meta[:completion_tokens_details] = raw_usage['completion_tokens_details']
             end
             meta
+          end
+
+          # Edge translation (O03a): vLLM speaks the OpenAI Chat wire usage
+          # dialect (prompt_tokens/completion_tokens + nested *_details).
+          # lex-llm 0.8.0's Canonical::Usage.from_hash reads canonical keys
+          # ONLY — the wire spellings must be normalized HERE, at the
+          # provider-translator boundary, or they fold into metadata and
+          # input/output_tokens resolve to nil (rendered 0). Canonical::Usage
+          # stays the SSOT: from_hash({}) is the valid all-nil no-usage object
+          # (never nil) for an absent wire usage.
+          def canonical_usage(raw)
+            return Canonical::Usage.from_hash({}) if raw.nil? || raw.empty?
+
+            source = raw.transform_keys { |key| key.respond_to?(:to_sym) ? key.to_sym : key }
+            Canonical::Usage.build(
+              input_tokens: source[:input_tokens] || source[:prompt_tokens],
+              output_tokens: source[:output_tokens] || source[:completion_tokens],
+              cache_read_tokens: extract_nested_cached_tokens(raw),
+              thinking_tokens: extract_nested_reasoning_tokens(raw)
+            )
+          end
+
+          def extract_nested_cached_tokens(raw)
+            raw.dig(:prompt_tokens_details, :cached_tokens) ||
+              raw.dig('prompt_tokens_details', 'cached_tokens') ||
+              raw.dig(:input_tokens_details, :cached_tokens) ||
+              raw.dig('input_tokens_details', 'cached_tokens')
+          end
+
+          def extract_nested_reasoning_tokens(raw)
+            raw.dig(:completion_tokens_details, :reasoning_tokens) ||
+              raw.dig('completion_tokens_details', 'reasoning_tokens') ||
+              raw.dig(:output_tokens_details, :reasoning_tokens) ||
+              raw.dig('output_tokens_details', 'reasoning_tokens')
           end
 
           def build_canonical_response(wire)
@@ -488,7 +463,7 @@ module Legion
               text: (extraction.content || '').to_s,
               thinking: build_canonical_thinking(extraction),
               tool_calls: resolve_tool_calls(extraction, message),
-              usage: Canonical::Usage.from_hash(wire['usage'] || {}),
+              usage: canonical_usage(wire['usage']),
               stop_reason: map_stop_reason(choice['finish_reason']),
               model: wire['model'],
               metadata: wire_metadata(wire, message, thinking_meta)
@@ -515,26 +490,30 @@ module Legion
           def build_done_chunk(data)
             Canonical::Chunk.done(
               request_id: data['request_id'] || data['id'],
-              usage: Canonical::Usage.from_hash(data['usage']),
+              usage: canonical_usage(data['usage']),
               stop_reason: nil
             )
           end
 
           # Build a tool_call_delta chunk preserving OpenAI streaming fragment semantics.
-          # Opening fragments carry id + name; continuation fragments carry id: nil and a
-          # partial-JSON arguments string. StreamAccumulator keys off nil id to append.
+          # The tool_call member is the delta FRAGMENT (the documented Chunk shape):
+          # opening fragments carry id + name; continuation fragments carry id: nil and a
+          # partial-JSON arguments string. StreamAccumulator correlates on the wire
+          # index and appends by nil id. A full Canonical::ToolCall is wrong here —
+          # its arguments member is Hash-only (O03a) and the accumulator reads the
+          # fragment by symbol keys.
           def build_tool_call_delta_chunk(first_call, request_id, stop_reason: nil, usage: nil)
             function = first_call.fetch('function', {})
-            tc = Canonical::ToolCall.new(
-              id: first_call['id'], exchange_id: nil,
-              name: function['name'], arguments: function['arguments'].to_s,
-              source: :client, status: nil, duration_ms: nil, result: nil,
-              error: nil, started_at: nil, finished_at: nil, category: nil,
-              data_handling_classification: nil, policy_decision: nil
-            )
             Canonical::Chunk.tool_call_delta(
-              tool_call: tc, request_id: request_id,
-              block_index: first_call['index'], stop_reason: stop_reason, usage: usage
+              tool_call: {
+                id: first_call['id'],
+                name: function['name'],
+                arguments: function['arguments'].to_s,
+                index: first_call['index']
+              },
+              request_id: request_id,
+              block_index: first_call['index'],
+              stop_reason: stop_reason, usage: usage
             )
           end
 
@@ -550,15 +529,14 @@ module Legion
 
         # Parses vLLM SSE stream chunks into Canonical::Chunk objects.
         module TranslatorChunkHelpers
-          FALLBACK_STOP_REASON = :end_turn
-
           private
 
           def coerce_chunk_input(raw)
             return nil if raw.nil?
             return nil if raw.is_a?(String) && (raw == '[DONE]' || raw.strip.empty?)
+            return raw if raw.is_a?(Hash)
 
-            raw.is_a?(Hash) ? raw : parse_json_safely(raw)
+            Legion::JSON.load(raw)
           end
 
           def error_chunk_from_hash(data)
@@ -585,14 +563,14 @@ module Legion
           def done_from_finish(data, request_id, finish_reason)
             Canonical::Chunk.done(
               request_id: request_id,
-              usage: Canonical::Usage.from_hash(data['usage']),
+              usage: data['usage'] ? canonical_usage(data['usage']) : nil,
               stop_reason: map_stop_reason(finish_reason)
             )
           end
 
           def parse_delta_content(delta, request_id, finish_reason, data)
             stop_reason = finish_reason ? map_stop_reason(finish_reason) : nil
-            usage = finish_reason && data['usage'] ? Canonical::Usage.from_hash(data['usage']) : nil
+            usage = finish_reason && data['usage'] ? canonical_usage(data['usage']) : nil
             tool_calls = Array(delta['tool_calls'])
             unless tool_calls.empty?
               return build_tool_call_chunks(tool_calls, delta['content'], request_id, stop_reason, usage)
@@ -649,30 +627,39 @@ module Legion
               blank_field?(delta['reasoning'])
           end
 
+          # V10: canonical-shaped input is an EXPLICIT conformance edge
+          # (the kit's shared examples feed canonical fixtures through the
+          # parse boundary); in production the wire is provider-shaped.
+          # A malformed canonical chunk is wiring corruption — it raises,
+          # it is never silently dropped (the debug-log → nil is deleted).
           def canonical_response?(wire)
             wire.key?('text') || wire['text'] || wire.key?(:stop_reason) || wire.key?('stop_reason')
           end
 
           def handle_canonical_chunk(data)
             Canonical::Chunk.from_hash(data)
-          rescue StandardError => e
-            log.debug { "vLLM translator canonical chunk parse error: #{e.message}" }
-            nil
+          end
+
+          # V9: an unknown finish_reason is a contract error, not a fact to
+          # default — the most benign semantic (:end_turn) would render a
+          # future provider state as a normal completion. Absence (nil)
+          # stays nil (honest absence, not a fabricated end-state).
+          # 'abort' is vLLM's documented in-band failure → :error.
+          def stop_reason_map_additions
+            { 'abort' => :error }
           end
 
           def map_stop_reason(raw)
-            return FALLBACK_STOP_REASON if raw.nil? || raw.to_s.empty?
+            return nil if raw.nil? || raw.to_s.empty?
 
-            stop_reason_lookup(raw) || FALLBACK_STOP_REASON
-          end
+            mapped = stop_reason_lookup(raw)
+            if mapped.nil?
+              raise ArgumentError,
+                    "vllm.translator: unmapped finish_reason #{raw.inspect} — " \
+                    'extend stop_reason_map_additions instead of defaulting'
+            end
 
-          def parse_json_safely(raw)
-            return nil unless raw.is_a?(String)
-
-            Legion::JSON.load(raw)
-          rescue Legion::JSON::ParseError => e
-            log.debug { "vLLM translator chunk parse error: #{e.message}" }
-            nil
+            mapped
           end
         end
 
@@ -772,19 +759,31 @@ module Legion
             payload
           end
 
+          # V16: a non-completion body is a transport/contract fault, not a
+          # provider-returned error response — it fails loud (raises)
+          # instead of completing the call with a successful :error
+          # response the ledger would record as a success. The
+          # canonical_error_response fail-open is deleted.
           def parse_response(wire)
-            return canonical_error_response(wire) unless wire.is_a?(Hash)
+            unless wire.is_a?(Hash)
+              raise ArgumentError,
+                    "vllm.parse_response: expected a Hash completion body, got #{wire.class}"
+            end
             return Canonical::Response.from_hash(wire) if canonical_response?(wire)
+            raise ArgumentError, 'vllm.parse_response: completion body carries no choices' \
+              unless wire['choices'].is_a?(Array)
 
             build_canonical_response(wire)
-          rescue Legion::JSON::ParseError => e
-            handle_exception(e, level: :warn, handled: true, operation: 'vllm.translator.parse_response')
-            canonical_error_response(wire)
           rescue StandardError => e
             handle_exception(e, level: :error, handled: false, operation: 'vllm.translator.parse_response')
             raise
           end
 
+          # V10: the base streaming layer hands this boundary parsed frames
+          # only (Hash, or a canonical-shaped chunk on the explicit
+          # conformance edge) — an unparseable frame is a classified
+          # failure upstream (M1), never a silent nil here. The dead
+          # ParseError → nil fail-open is deleted.
           def parse_chunk(raw)
             data = coerce_chunk_input(raw)
             return nil if data.nil?
@@ -792,9 +791,6 @@ module Legion
             return error_chunk_from_hash(data) if data['error']
 
             parse_openai_chunk(data)
-          rescue Legion::JSON::ParseError => e
-            handle_exception(e, level: :warn, handled: true, operation: 'vllm.translator.parse_chunk')
-            nil
           rescue StandardError => e
             handle_exception(e, level: :error, handled: false, operation: 'vllm.translator.parse_chunk')
             raise
@@ -807,7 +803,7 @@ module Legion
               tool_calls_as_text: true,
               forced_tool_choice: true,
               thinking_tags: %w[think thinking],
-              stop_reason_map: stop_reason_map,
+              stop_reason_map: stop_reason_map.merge(stop_reason_map_additions),
               streaming_token_usage: true
             }.freeze
           end

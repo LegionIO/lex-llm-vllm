@@ -5,7 +5,6 @@ require 'spec_helper'
 RSpec.describe Legion::Extensions::Llm::Vllm::Translator do
   subject(:translator) { described_class.new }
 
-  let(:config_translator) { described_class.new(config: { enable_thinking: true }) }
   let(:canonical) { Legion::Extensions::Llm::Canonical }
 
   it_behaves_like 'a canonical provider translator', described_class
@@ -71,9 +70,34 @@ RSpec.describe Legion::Extensions::Llm::Vllm::Translator do
       expect(wire[:seed]).to eq(42)
     end
 
-    it 'enables thinking via chat_template_kwargs when config has enable_thinking' do
+    # V2: the canonical request is the SOLE thinking authority — a plain
+    # translator (no config dial) renders thinking for a request that asks
+    # for it, carrying the resolved budget via the chat template.
+    it 'renders thinking from the canonical request via chat_template_kwargs' do
       req = canonical::Request.from_hash(fixture_with_model('canonical_thinking_request'))
-      expect(config_translator.render_request(req)[:chat_template_kwargs]).to eq(enable_thinking: true)
+      expect(translator.render_request(req)[:chat_template_kwargs]).to eq(enable_thinking: true, thinking_budget: 4096)
+    end
+
+    # V2: a silent canonical request renders a silent wire — the per-instance
+    # config dial no longer forks identical requests across instances.
+    it 'renders no thinking kwargs when the canonical request is silent' do
+      req = canonical::Request.build(messages: [], metadata: { model: 'm' })
+      expect(translator.render_request(req)).not_to have_key(:chat_template_kwargs)
+    end
+
+    # New superset: enabled:false is an explicit OFF (forces a default-ON model off).
+    it 'renders enable_thinking:false when thinking is explicitly disabled' do
+      req = canonical::Request.build(messages: [], metadata: { model: 'm' },
+                                     thinking: canonical::Thinking::Config.build(enabled: false))
+      expect(translator.render_request(req)[:chat_template_kwargs]).to eq(enable_thinking: false)
+    end
+
+    # Cross-axis: an effort-only client still yields a budget for the vLLM wire
+    # via resolved_budget — never dropped, no params dual-home.
+    it 'derives thinking_budget from an effort-only config via resolved_budget' do
+      req = canonical::Request.build(messages: [], metadata: { model: 'm' },
+                                     thinking: canonical::Thinking::Config.build(effort: 'high'))
+      expect(translator.render_request(req)[:chat_template_kwargs]).to eq(enable_thinking: true, thinking_budget: 16_384)
     end
 
     it 'renders tool_choice as named function for explicit choice' do
@@ -135,6 +159,140 @@ RSpec.describe Legion::Extensions::Llm::Vllm::Translator do
         expect(result.tool_calls).to be_empty
       end
     end
+
+    # V1: the parse side of thinking was untested — the strict factory
+    # (Canonical::Thinking.build) must construct valid data for the
+    # Qwen-style reasoning wire, with or without a signature.
+    context 'with reasoning_content metadata (Qwen-style thinking wire)' do
+      it 'builds a Canonical::Thinking with content and nil signature' do
+        wire = {
+          'choices' => [{
+            'message' => { 'content' => 'The answer is 42.', 'reasoning_content' => 'Let me work it out.' },
+            'finish_reason' => 'stop'
+          }],
+          'usage' => { 'prompt_tokens' => 5, 'completion_tokens' => 20 },
+          'model' => 'qwen3.6-27b'
+        }
+        result = translator.parse_response(wire)
+
+        expect(result.text).to eq('The answer is 42.')
+        expect(result.thinking).to be_a(canonical::Thinking)
+        expect(result.thinking.content).to eq('Let me work it out.')
+        expect(result.thinking.signature).to be_nil
+      end
+
+      it 'builds a Canonical::Thinking carrying the wire signature' do
+        wire = {
+          'choices' => [{
+            'message' => {
+              'content' => 'The answer is 42.',
+              'reasoning_content' => 'Let me work it out.',
+              'reasoning_signature' => 'sig-abc'
+            },
+            'finish_reason' => 'stop'
+          }],
+          'usage' => { 'prompt_tokens' => 5, 'completion_tokens' => 20 }
+        }
+        result = translator.parse_response(wire)
+
+        expect(result.thinking.signature).to eq('sig-abc')
+      end
+    end
+
+    # V4: the declared tool_calls_as_text quirk stays, but a synthesized
+    # call with unparseable arguments fails the call (the strict
+    # ToolArguments policy) instead of fabricating empty arguments, and no
+    # source is stamped (attribution is the executor's fact, not the
+    # provider's).
+    context 'with a synthesized text tool call (V4)' do
+      it 'synthesizes a call with parsed arguments and nil source' do
+        wire = {
+          'choices' => [{
+            'message' => { 'content' => '{"name": "get_weather", "arguments": {"city": "SF"}}' },
+            'finish_reason' => 'stop'
+          }],
+          'usage' => { 'prompt_tokens' => 3, 'completion_tokens' => 8 }
+        }
+        result = translator.parse_response(wire)
+
+        expect(result.tool_calls.size).to eq(1)
+        expect(result.tool_calls.first.name).to eq('get_weather')
+        expect(result.tool_calls.first.arguments).to eq(city: 'SF')
+        expect(result.tool_calls.first.source).to be_nil
+      end
+
+      it 'raises on unparseable synthesized arguments instead of fabricating {}' do
+        wire = {
+          'choices' => [{
+            'message' => { 'content' => '{"name": "get_weather", "arguments": "{not-valid-json"}' },
+            'finish_reason' => 'stop'
+          }],
+          'usage' => { 'prompt_tokens' => 3, 'completion_tokens' => 8 }
+        }
+        expect { translator.parse_response(wire) }.to raise_error(ArgumentError, /tool call arguments/)
+      end
+    end
+
+    # V16: a non-completion body is a transport/contract fault — it fails
+    # loud instead of completing the call with a successful :error response.
+    context 'with a non-completion body (V16)' do
+      it 'raises on a non-Hash body' do
+        expect { translator.parse_response('not a completion') }
+          .to raise_error(ArgumentError, /expected a Hash completion body/)
+      end
+
+      it 'raises on a Hash body that carries no choices' do
+        expect { translator.parse_response({ 'error' => { 'message' => 'boom' } }) }
+          .to raise_error(ArgumentError, /no choices/)
+      end
+    end
+  end
+
+  # The provider-translator edge (O03a) must normalize the OpenAI Chat wire
+  # usage dialect (prompt_tokens/completion_tokens + nested *_details) into
+  # canonical keys BEFORE from_hash — otherwise the wire spellings fold into
+  # metadata and input_tokens/output_tokens resolve to nil (rendered 0).
+  describe '#parse_response usage (OpenAI wire dialect normalization)' do
+    it 'maps prompt_tokens/completion_tokens to canonical input/output tokens' do
+      wire = {
+        'model' => 'vllm-test',
+        'choices' => [{ 'message' => { 'content' => 'hi' }, 'finish_reason' => 'stop' }],
+        'usage' => { 'prompt_tokens' => 12, 'completion_tokens' => 34 }
+      }
+      usage = translator.parse_response(wire).usage
+      expect(usage.input_tokens).to eq(12)
+      expect(usage.output_tokens).to eq(34)
+    end
+
+    it 'extracts nested cached_tokens and reasoning_tokens (Chat API details)' do
+      wire = {
+        'model' => 'vllm-test',
+        'choices' => [{ 'message' => { 'content' => 'hi' }, 'finish_reason' => 'stop' }],
+        'usage' => {
+          'prompt_tokens' => 1000,
+          'completion_tokens' => 50,
+          'prompt_tokens_details' => { 'cached_tokens' => 800 },
+          'completion_tokens_details' => { 'reasoning_tokens' => 20 }
+        }
+      }
+      usage = translator.parse_response(wire).usage
+      expect(usage.input_tokens).to eq(1000)
+      expect(usage.output_tokens).to eq(50)
+      expect(usage.cache_read_tokens).to eq(800)
+      expect(usage.thinking_tokens).to eq(20)
+    end
+
+    it 'normalizes symbol-keyed usage (from Legion::JSON.load)' do
+      wire = {
+        'model' => 'vllm-test',
+        'choices' => [{ 'message' => { 'content' => 'hi' }, 'finish_reason' => 'stop' }],
+        'usage' => { prompt_tokens: 5, completion_tokens: 7, prompt_tokens_details: { cached_tokens: 3 } }
+      }
+      usage = translator.parse_response(wire).usage
+      expect(usage.input_tokens).to eq(5)
+      expect(usage.output_tokens).to eq(7)
+      expect(usage.cache_read_tokens).to eq(3)
+    end
   end
 
   describe 'stop_reason mapping' do
@@ -146,6 +304,38 @@ RSpec.describe Legion::Extensions::Llm::Vllm::Translator do
     it 'maps length to max_tokens' do
       wire = { 'choices' => [{ 'message' => { 'content' => '' }, 'finish_reason' => 'length' }] }
       expect(translator.parse_response(wire).stop_reason).to eq(:max_tokens)
+    end
+
+    # V9: vLLM's documented in-band failure maps to :error (honest), and an
+    # unknown future finish_reason is a contract error — not a silent
+    # default to the most benign semantic.
+    it 'maps abort to error' do
+      wire = { 'choices' => [{ 'message' => { 'content' => '' }, 'finish_reason' => 'abort' }] }
+      expect(translator.parse_response(wire).stop_reason).to eq(:error)
+    end
+
+    it 'raises on an unmapped finish_reason' do
+      wire = { 'choices' => [{ 'message' => { 'content' => '' }, 'finish_reason' => 'safety_stop' }] }
+      expect { translator.parse_response(wire) }.to raise_error(ArgumentError, /unmapped finish_reason/)
+    end
+  end
+
+  describe '#parse_chunk' do
+    # V10: canonical-shaped chunks are the explicit conformance edge.
+    # (Unknown chunk TYPES pass through by the core's consume-side G20d
+    # contract; a malformed MEMBER SHAPE is wiring corruption — under the
+    # old debug-log rescue it was silently dropped, now it raises.)
+    it 'parses a well-formed canonical chunk' do
+      chunk = translator.parse_chunk({ 'type' => 'text_delta', 'delta' => 'hi', 'request_id' => 'r1' })
+
+      expect(chunk).to be_a(canonical::Chunk)
+      expect(chunk.type).to eq(:text_delta)
+      expect(chunk.delta).to eq('hi')
+    end
+
+    it 'raises on a malformed canonical chunk instead of dropping it' do
+      expect { translator.parse_chunk({ 'type' => 'text_delta', 'usage' => 'garbage' }) }
+        .to raise_error(ArgumentError)
     end
   end
 end

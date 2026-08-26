@@ -30,13 +30,13 @@ RSpec.describe Legion::Extensions::Llm::Vllm::Provider do
   end
 
   describe 'parallel tool calls with interleaved argument fragments' do
-    subject(:message) do
+    subject(:response) do
       accumulator = Legion::Extensions::Llm::StreamAccumulator.new
       sequence.each do |data|
         chunk = provider.send(:build_chunk, data)
         accumulator.add(chunk) if chunk
       end
-      accumulator.to_message(nil)
+      accumulator.to_response(model: nil)
     end
 
     let(:sequence) do
@@ -53,10 +53,13 @@ RSpec.describe Legion::Extensions::Llm::Vllm::Provider do
     end
 
     it 'reassembles each call from its own wire index, not recency' do
-      expect(message.tool_calls.keys).to match_array(%w[call_A call_B])
-      expect(message.tool_calls['call_A'].arguments).to eq({ 'command' => 'echo ALPHA_7Q' })
-      expect(message.tool_calls['call_B'].arguments).to eq({ 'command' => 'echo BRAVO_4Z' })
-      expect(message.stop_reason).to eq(:tool_use)
+      expect(response).to be_a(Legion::Extensions::Llm::Canonical::Response)
+      expect(response.tool_calls.map(&:id)).to match_array(%w[call_A call_B])
+      call_a = response.tool_calls.find { |tc| tc.id == 'call_A' }
+      call_b = response.tool_calls.find { |tc| tc.id == 'call_B' }
+      expect(call_a.arguments).to eq({ 'command' => 'echo ALPHA_7Q' })
+      expect(call_b.arguments).to eq({ 'command' => 'echo BRAVO_4Z' })
+      expect(response.stop_reason).to eq(:tool_use)
     end
   end
 end

@@ -1,21 +1,31 @@
 # frozen_string_literal: true
 
 require 'spec_helper'
+require 'legion/extensions/llm/vllm/runners/discovery'
 
 RSpec.describe Legion::Extensions::Llm::Vllm do
-  let(:provider) { described_class::Provider.new(Legion::Extensions::Llm.config) }
-  let(:model) { Legion::Extensions::Llm::Model::Info.new(id: 'meta-llama/Llama-3.1-8B-Instruct', provider: :vllm) }
-  let(:registry_publisher) { instance_double(Legion::Extensions::Llm::RegistryPublisher) }
+  # V6: a provider is only executable with its OWN explicit endpoint —
+  # the test provider carries one, as every production instance config does.
+  let(:provider) { described_class::Provider.new(vllm_api_base: 'http://localhost:8000') }
+  let(:model) { 'meta-llama/Llama-3.1-8B-Instruct' }
 
-  it 'exposes simple provider defaults with thinking enabled' do
+  it 'exposes simple provider defaults' do
     settings = described_class.default_settings
     instance = settings.dig(:instances, :default)
 
     expect(settings[:enabled]).to be true
     expect(settings[:provider_family]).to eq(:vllm)
     expect(instance[:endpoint]).to eq('http://localhost:8000')
-    expect(instance[:enable_thinking]).to be true
     expect(instance.dig(:fleet, :respond_to_requests)).to be false
+  end
+
+  # V2: no enable_thinking default ships — a shipped config dial is a second
+  # thinking authority (it would execute thinking the canonical request did
+  # not ask for) and contradicts the :unknown thinking publication.
+  it 'ships no enable_thinking default in the instance template' do
+    instance = described_class.default_settings.dig(:instances, :default)
+
+    expect(instance).not_to have_key(:enable_thinking)
   end
 
   it 'does not register on the deprecated Provider.register registry' do
@@ -41,150 +51,151 @@ RSpec.describe Legion::Extensions::Llm::Vllm do
                                    '/wake_up'])
   end
 
-  it 'renders chat payloads through the shared OpenAI-compatible adapter' do
-    message = Legion::Extensions::Llm::Message.new(role: :user, content: 'hello')
-    payload = provider.send(:render_payload, [message], tools: {}, temperature: 0.2, model: model, stream: false,
+  it 'renders chat payloads from canonical values through the vLLM dialect translator' do
+    message = Legion::Extensions::Llm::Canonical::Message.build(role: :user, content: 'hello')
+    params = Legion::Extensions::Llm::Canonical::Params.build(temperature: 0.2)
+
+    payload = provider.send(:render_payload, [message], tools: {}, params: params, model: model, stream: false,
                                                         schema: nil, thinking: nil, tool_prefs: nil)
 
     expect(payload.values_at(:model, :stream, :temperature)).to eq(['meta-llama/Llama-3.1-8B-Instruct', false, 0.2])
     expect(payload[:messages]).to eq([{ role: 'user', content: 'hello' }])
   end
 
-  it 'uses provider instance thinking settings when rendering chat payloads' do
+  # V2: the instance config is no longer a thinking authority — a silent
+  # canonical request renders a silent wire even on a config that sets
+  # enable_thinking (the dial no longer exists; the key is inert).
+  it 'renders no thinking kwargs for a silent canonical request regardless of config' do
     configured = described_class::Provider.new(vllm_api_base: 'http://localhost:8000', enable_thinking: true)
-    message = Legion::Extensions::Llm::Message.new(role: :user, content: 'hello')
+    message = Legion::Extensions::Llm::Canonical::Message.build(role: :user, content: 'hello')
 
-    payload = configured.send(:render_payload, [message], tools: {}, temperature: 0.2, model: model, stream: false,
+    payload = configured.send(:render_payload, [message], tools: {}, params: nil, model: model, stream: false,
                                                           schema: nil, thinking: nil, tool_prefs: nil)
 
-    expect(payload[:chat_template_kwargs]).to eq(enable_thinking: true)
+    expect(payload).not_to have_key(:chat_template_kwargs)
+  end
+
+  # V6: an endpoint-less instance is unexecutable — construction fails
+  # through the base ensure_configured! contract; no localhost or
+  # sibling-endpoint fallback exists.
+  it 'raises at construction when the instance has no explicit endpoint' do
+    expect { described_class::Provider.new(tier: :local) }
+      .to raise_error(Legion::Extensions::Llm::ConfigurationError, /vllm_api_base/)
   end
 
   it 'uses an optional bearer token when configured' do
-    original = Legion::Extensions::Llm.config.vllm_api_key
-    Legion::Extensions::Llm.config.vllm_api_key = 'token-abc123'
+    tokened = described_class::Provider.new(vllm_api_base: 'http://localhost:8000', vllm_api_key: 'token-abc123')
 
-    expect(provider.headers).to eq('Authorization' => 'Bearer token-abc123')
+    expect(tokened.headers).to eq('Authorization' => 'Bearer token-abc123')
+  end
+
+  # V15: a block-shaped system prompt is not representable on the vLLM
+  # dialect — it fails at the edge instead of vanishing.
+  it 'raises when the system message content is not a plain String' do
+    system_blocks = Legion::Extensions::Llm::Canonical::Message.build(
+      role: :system, content: [{ type: 'text', text: 'be brief' }]
+    )
+    user = Legion::Extensions::Llm::Canonical::Message.build(role: :user, content: 'hello')
+    model = 'gemma-4-31b-it'
+
+    expect do
+      provider.send(:render_payload, [system_blocks, user], tools: {}, params: nil, model: model, stream: false, schema: nil, thinking: nil, tool_prefs: nil)
+    end.to raise_error(ArgumentError, /system prompt must be a plain String/)
+  end
+
+  # 0.8.0 (07 C5): the legacy ModelOffering production path is deleted — the
+  # per-gem writer (Runners::Discovery, the shared Discovery::Pipeline)
+  # publishes OfferingDrafts; the base read path serves the activated
+  # inventory offerings for this instance from the registry snapshot.
+
+  it 'serves the activated inventory offerings for the instance from the registry snapshot (07 C5)' do
+    key = Legion::Extensions::Llm::Inventory::Identity::InstanceKey.new(
+      provider_family: :vllm, instance_id: 'default'
+    )
+    publisher = Legion::Extensions::Llm::Inventory::Publisher.new(provider_family: :vllm)
+    coordinator = Legion::Extensions::Llm::Inventory::ProbeCoordinator.new(instance_key: key, enqueue: ->(**) { true })
+    callable = Legion::Extensions::Llm::Vllm::Helpers::Callable.new(
+      instance_cfg: { name: 'default', tier: :local }, logger: Logger.new(File::NULL)
+    )
+    token = publisher.claim_instance(instance_id: 'default', callable: callable, probe_request_handle: coordinator)
+    probe = publisher.readiness_probe_started(instance_id: 'default', publisher_token: token)
+    draft = described_class::Runners::Discovery.build_offering_draft(
+      instance_cfg: { name: 'default', tier: :local }, instance_key: key,
+      model_id: 'meta-llama/Llama-3.1-8B-Instruct',
+      model_data: { id: 'meta-llama/Llama-3.1-8B-Instruct', max_model_len: 131_072 }
+    )
+    publisher.activate_instance_snapshot(
+      instance_id: 'default', publisher_token: token, offerings: [draft], sequence: 0, probe_token: probe
+    )
+
+    offerings = provider.discover_offerings
+
+    expect(offerings.size).to eq(1)
+    expect(offerings.first.model).to eq('meta-llama/Llama-3.1-8B-Instruct')
+    expect(offerings.first.instance_key.instance_id).to eq('default')
   ensure
-    Legion::Extensions::Llm.config.vllm_api_key = original
+    Legion::Extensions::Llm::Inventory::Registry.reset!
   end
 
-  it 'maps discovered models with context_length from max_model_len' do
-    models = provider.send(:parse_list_models_response, fake_response(models_body), :vllm,
-                           described_class::Provider.capabilities)
+  # H5 (0.8.0): the offerings read path performs NO transport — it is an
+  # in-memory snapshot lookup, and `live:` is accepted for signature
+  # compatibility only.
+  it 'performs no transport on offerings reads, even with live: true' do
+    connection = instance_spy(Legion::Extensions::Llm::Connection)
+    allow(provider).to receive(:connection).and_return(connection)
 
-    expect(models.first.capabilities).to eq([:streaming])
-    expect(models.first.context_length).to eq(131_072)
+    expect { provider.discover_offerings(live: true) }.not_to raise_error
+    expect(connection).not_to have_received(:get)
+    expect(connection).not_to have_received(:post)
   end
 
-  it 'publishes live readiness metadata asynchronously through the registry publisher' do
-    allow(described_class).to receive(:registry_publisher).and_return(registry_publisher)
-    allow(provider.connection).to receive(:get).with('/health').and_return(fake_response({}))
-    allow(registry_publisher).to receive(:publish_readiness_async)
-
-    readiness = provider.readiness(live: true)
-
-    expect(registry_publisher).to have_received(:publish_readiness_async).with(readiness)
-  end
-
-  it 'returns structured provider health for live discovery offerings' do
-    allow(provider.connection).to receive(:get).with('/health').and_return(fake_response({}))
-    stub_model_discovery
-
-    offering = provider.discover_offerings(live: true).first
-
-    expect(offering.health).to include(provider: :vllm, instance_id: :default)
-    expect(offering.health[:raw]).to eq({})
-  end
-
-  it 'publishes discovered models asynchronously through the registry publisher' do
-    stub_registry_publisher
-    stub_model_discovery
-    allow(provider).to receive(:health).and_return(provider: :vllm, instance_id: :default, ready: true,
-                                                   status: 'healthy', circuit_state: 'closed', raw: {})
-    allow(registry_publisher).to receive(:publish_readiness_async)
-
-    provider.discover_offerings(live: true)
-
-    expect(registry_publisher).to have_received(:publish_models_async).at_least(:once)
-  end
-
-  it 'does not probe vLLM for uncached non-live offerings reads' do
-    allow(provider).to receive(:list_models).and_raise('unexpected live discovery')
-
-    expect(provider.discover_offerings).to eq([])
-    expect(provider).not_to have_received(:list_models)
-  end
-
-  it 'marks offering discovery failures handled before falling back' do
-    error = RuntimeError.new('vllm unavailable')
-    allow(provider).to receive(:list_models).and_raise(error)
-    allow(provider).to receive(:handle_exception)
-
-    expect(provider.discover_offerings(live: true)).to eq([])
-    expect(provider).to have_received(:handle_exception)
-      .with(error, level: :warn, handled: true, operation: 'vllm.discover_offerings')
-  end
-
-  it 'serves non-live offerings reads from the live discovery cache' do
-    allow(provider.connection).to receive(:get).with('/health').and_return(fake_response({}))
-    stub_model_discovery
-    live_offerings = provider.discover_offerings(live: true)
-    allow(provider).to receive(:list_models).and_raise('unexpected live discovery')
-
-    expect(provider.discover_offerings.map(&:model)).to eq(live_offerings.map(&:model))
-  end
-
-  it 'uses provider instance transport and tier in discovered offerings' do
-    configured = described_class::Provider.new(instance_id: :apollo, transport: :rabbitmq, tier: :fleet)
-    offering = configured.send(:offering_from_model, model)
-
-    expect(offering.to_h).to include(instance_id: :apollo, transport: :rabbitmq, tier: :fleet)
-  end
-
-  it 'translates instance enable_* flags into offering capabilities' do
-    configured = described_class::Provider.new(
-      vllm_api_base: 'http://localhost:8000',
-      enable_thinking: true,
-      enable_tools: true,
-      enable_streaming: true
+  it 'filters snapshot offerings by model and instance keys' do
+    key = Legion::Extensions::Llm::Inventory::Identity::InstanceKey.new(
+      provider_family: :vllm, instance_id: 'default'
     )
-    offering = configured.send(:offering_from_model, model)
-
-    expect(offering.capabilities).to include(:completion, :tools, :thinking, :streaming)
-  end
-
-  it 'does not reclassify inference models as embeddings when embedding is not resolved' do
-    configured = described_class::Provider.new(
-      vllm_api_base: 'http://localhost:8000',
-      enable_thinking: true,
-      enable_tools: true
+    publisher = Legion::Extensions::Llm::Inventory::Publisher.new(provider_family: :vllm)
+    coordinator = Legion::Extensions::Llm::Inventory::ProbeCoordinator.new(instance_key: key, enqueue: ->(**) { true })
+    callable = Legion::Extensions::Llm::Vllm::Helpers::Callable.new(
+      instance_cfg: { name: 'default', tier: :local }, logger: Logger.new(File::NULL)
+    )
+    token = publisher.claim_instance(instance_id: 'default', callable: callable, probe_request_handle: coordinator)
+    probe = publisher.readiness_probe_started(instance_id: 'default', publisher_token: token)
+    draft = described_class::Runners::Discovery.build_offering_draft(
+      instance_cfg: { name: 'default', tier: :local }, instance_key: key,
+      model_id: 'meta-llama/Llama-3.1-8B-Instruct',
+      model_data: { id: 'meta-llama/Llama-3.1-8B-Instruct', max_model_len: 131_072 }
+    )
+    publisher.activate_instance_snapshot(
+      instance_id: 'default', publisher_token: token, offerings: [draft], sequence: 0, probe_token: probe
     )
 
-    offering = configured.send(:offering_from_model, model)
-
-    expect(offering.usage_type).to eq(:inference)
-    expect(offering.capabilities).not_to include(:embedding)
-  end
-
-  it 'builds sanitized lex-llm registry events for vLLM model availability' do
-    events = capture_registry_events([model], readiness: { ready: true })
-
-    expect(events.first.to_h).to include(event_type: :offering_available)
-    expect(events.first.to_h.dig(:offering, :provider_family)).to eq(:vllm)
-    expect(events.first.to_h.dig(:offering, :model)).to eq('meta-llama/Llama-3.1-8B-Instruct')
-  end
-
-  it 'delegates registry_publisher to the base RegistryPublisher class' do
-    publisher = described_class.registry_publisher
-
-    expect(publisher).to be_a(Legion::Extensions::Llm::RegistryPublisher)
-    expect(publisher.provider_family).to eq(:vllm)
+    expect(provider.discover_offerings(model: 'meta-llama/Llama-3.1-8B-Instruct')).not_to be_empty
+    expect(provider.discover_offerings(model: 'other-model')).to be_empty
+    expect(provider.discover_offerings(instance: 'other-instance')).to be_empty
+  ensure
+    Legion::Extensions::Llm::Inventory::Registry.reset!
   end
 
   describe '.discover_instances' do
     def stub_vllm_instances(value)
       allow(described_class).to receive(:settings).and_return({ instances: value })
+    end
+
+    # V13: NO stub — the module-level settings read resolves through the
+    # explicit Legion::Settings::Helper extension to the genuine
+    # [:extensions][:llm][:vllm] tree (loader injection is not a dependency).
+    it 'resolves settings from the genuine settings tree without stubbing' do
+      original_llm = Legion::Settings[:extensions][:llm]
+      Legion::Settings[:extensions][:llm] = {
+        vllm: { instances: { apollo: { vllm_api_base: 'http://apollo:8000' } } }
+      }
+
+      instances = described_class.discover_instances
+
+      expect(instances.keys).to eq([:apollo])
+      expect(instances[:apollo]).to include(vllm_api_base: 'http://apollo:8000', tier: :direct)
+    ensure
+      Legion::Settings[:extensions][:llm] = original_llm
     end
 
     it 'returns configured instances from extension settings' do
@@ -234,6 +245,26 @@ RSpec.describe Legion::Extensions::Llm::Vllm do
 
       expect(instances.keys).to contain_exactly(:default, :apollo)
       expect(instances[:default]).to include(vllm_api_base: 'http://apollo-001:8000', tier: :direct)
+    end
+
+    # The shared Discovery::Pipeline reads discover_instances as the single
+    # claimable source — an operator's enabled: false is a skip, never a claim
+    # (a disabled instance would otherwise be claimed + published as a live lane).
+    it 'skips instances with enabled: false' do
+      stub_vllm_instances(
+        apollo: { vllm_api_base: 'http://apollo:8000' },
+        off: { vllm_api_base: 'http://off-node:8000', enabled: false }
+      )
+      instances = described_class.discover_instances
+
+      expect(instances.keys).to eq([:apollo])
+      expect(instances).not_to have_key(:off)
+    end
+
+    it 'keeps an instance with enabled: true in the claimable set' do
+      stub_vllm_instances({ apollo: { vllm_api_base: 'http://apollo:8000', enabled: true } })
+
+      expect(described_class.discover_instances.keys).to eq([:apollo])
     end
 
     # D3: an entry with no resolvable endpoint is unclaimable — skip it rather
@@ -322,87 +353,5 @@ RSpec.describe Legion::Extensions::Llm::Vllm do
   def management_urls
     [provider.health_url, provider.version_url, provider.reset_prefix_cache_url, provider.reset_mm_cache_url,
      provider.sleep_url, provider.wake_up_url]
-  end
-
-  def models_body
-    { 'data' => [{ 'id' => 'meta-llama/Llama-3.1-8B-Instruct', 'created' => 1, 'max_model_len' => 131_072 }] }
-  end
-
-  def fake_response(body)
-    Struct.new(:body).new(body)
-  end
-
-  def stub_model_discovery
-    allow(provider.connection).to receive(:get).with('/v1/models').and_return(fake_response(models_body))
-  end
-
-  def stub_registry_publisher
-    allow(described_class).to receive(:registry_publisher).and_return(registry_publisher)
-    allow(registry_publisher).to receive(:publish_models_async)
-  end
-
-  def capture_registry_events(models, readiness:)
-    publisher = Legion::Extensions::Llm::RegistryPublisher.new(provider_family: :vllm)
-    events = []
-    allow(publisher).to receive(:publishing_available?).and_return(true)
-    allow(publisher).to receive(:publish_event) { |event| events << event }
-    allow(publisher).to receive(:schedule).and_yield
-    publisher.publish_models_async(models, readiness:)
-    events
-  end
-
-  describe 'CapabilityPolicy integration' do
-    let(:bare_model) do
-      Legion::Extensions::Llm::Model::Info.from_hash(
-        id: 'gemma-4-12b-it', name: 'gemma-4-12b-it', provider: :vllm,
-        context_length: 32_768, capabilities: [], metadata: {}
-      )
-    end
-
-    it 'does not claim tools/vision/embeddings/thinking for a bare model discovery response' do
-      offering = provider.send(:offering_from_model, bare_model)
-
-      expect(offering.capabilities).to include(:streaming)
-      expect(offering.capabilities).not_to include(:tools)
-      expect(offering.capabilities).not_to include(:vision)
-      expect(offering.capabilities).not_to include(:embedding)
-      expect(offering.capabilities).not_to include(:thinking)
-    end
-
-    it 'produces capabilities from instance config with source :instance_override' do
-      configured = described_class::Provider.new(
-        vllm_api_base: 'http://localhost:8000',
-        capabilities: { streaming: true, tools: true, thinking: true }
-      )
-      offering = configured.send(:offering_from_model, bare_model)
-
-      expect(offering.capabilities).to include(:streaming, :tools, :thinking)
-      sources = offering.capability_sources
-      expect(sources[:tools][:source]).to eq(:instance_override)
-      expect(sources[:thinking][:source]).to eq(:instance_override)
-    end
-
-    it 'produces :thinking from enable_thinking alias with source :instance_override' do
-      configured = described_class::Provider.new(
-        vllm_api_base: 'http://localhost:8000',
-        enable_thinking: true
-      )
-      offering = configured.send(:offering_from_model, bare_model)
-
-      expect(offering.capabilities).to include(:thinking)
-      expect(offering.capability_sources[:thinking][:source]).to eq(:instance_override)
-    end
-
-    it 'produces capabilities from model-level override with source :model_override' do
-      configured = described_class::Provider.new(
-        vllm_api_base: 'http://localhost:8000',
-        models: { 'gemma-4-12b-it' => { tools_flag: true, thinking_flag: true } }
-      )
-      offering = configured.send(:offering_from_model, bare_model)
-
-      expect(offering.capabilities).to include(:tools, :thinking)
-      expect(offering.capability_sources[:tools][:source]).to eq(:model_override)
-      expect(offering.capability_sources[:thinking][:source]).to eq(:model_override)
-    end
   end
 end

@@ -17,30 +17,20 @@ require 'legion/extensions/llm/capabilities'
 require 'legion/extensions/llm/fleet/worker_execution'
 require 'legion/extensions/llm/fleet/protocol'
 
-# Stub the actor runtime base class so the discovery actor loads in test
-# context (the real Every requires the full LegionIO runtime).
-module Legion
-  module Extensions
-    module Actors
-      unless const_defined?(:Every, false)
-        class Every
-          def initialize(*_args) = nil
-        end
-      end
-    end
-  end
-end
+# The Actors::Every stub ships in spec_helper (before the gem load), so the
+# shared discovery actor and the vLLM Actor::Discovery are already defined.
 
 # Load the production callable, the discovery actor, and the production
-# OfferingBuilder. The conformance spec exercises the REAL VllmCallable
-# (D1/D6) and DELEGATES draft-building to the production OfferingBuilder
-# (D16) — no test-only subclass or duplicated builder.
-require 'legion/extensions/llm/vllm/callable'
-require 'legion/extensions/llm/vllm/actors/discovery_refresh'
-require 'legion/extensions/llm/vllm/helpers/offering_builder'
+# discovery runner. The conformance spec exercises the REAL
+# Helpers::Callable (D1/D6) and DELEGATES draft-building to the production
+# Runners::Discovery#build_offering_draft (D16) — no test-only subclass or
+# duplicated builder.
+require 'legion/extensions/llm/vllm/helpers/callable'
+require 'legion/extensions/llm/vllm/actors/discovery'
+require 'legion/extensions/llm/vllm/runners/discovery'
 
 # Supporting helpers for the SSOT v3 conformance harness. Draft/evidence
-# building is DELEGATED to the production OfferingBuilder (see
+# building is DELEGATED to the production Runners::Discovery (see
 # VllmSsotHarness#build_offering_drafts) — only the error-body + identity
 # helpers that are specific to the spec remain here.
 module VllmSsotEvidenceHelpers
@@ -109,48 +99,52 @@ class VllmSsotHarness
   end
 
   def build_callable(instance_config:)
-    Legion::Extensions::Llm::Vllm::VllmCallable.new(instance_cfg: instance_config, logger: Logger.new(File::NULL))
+    Legion::Extensions::Llm::Vllm::Helpers::Callable.new(instance_cfg: instance_config, logger: Logger.new(File::NULL))
   end
 
-  # D16: delegate draft-building to the PRODUCTION OfferingBuilder (not a
-  # duplicated copy) so a bug in the real path (constant scope, NameError,
-  # malformed evidence) is exercised by the conformance spec rather than hidden
-  # by a stand-in. The kit's tier param is honored by overriding the instance
-  # tier; the instance_key is derived from the passed instance_config.
+  # D16: delegate draft-building to the PRODUCTION Runners::Discovery
+  # (not a duplicated copy) so a bug in the real path (constant scope,
+  # NameError, malformed evidence) is exercised by the conformance spec
+  # rather than hidden by a stand-in. The kit's tier param is honored by
+  # overriding the instance tier; the instance_key is derived from the passed
+  # instance_config.
   def build_offering_drafts(tier: :local, instance_config: nil, **)
     cfg_source = instance_config || instance_configs.first
-    cfg_source.merge(tier: tier)
-    builder = offering_builder(tier: tier, instance_config: cfg_source)
     model_id = 'meta-llama/Llama-3.1-8B-Instruct'
-    [builder.build(model_id: model_id, model_data: { id: model_id, max_model_len: 131_072 })]
+    build_drafts(cfg_source, tier: tier, model_id: model_id,
+                             model_data: { id: model_id, max_model_len: 131_072 })
   end
 
-  # Embedding-model variant of the draft builder: the production
-  # OfferingBuilder decides operation evidence from the catalog `type`, so this
-  # is the conformance path for the authoritative chat-exclusion check.
+  # Embedding-model variant of the draft builder: the production runner
+  # decides operation evidence from the catalog `type`, so this is the
+  # conformance path for the authoritative chat-exclusion check.
   def build_embedding_offering_drafts(instance_config:, tier: :local)
-    builder = offering_builder(tier: tier, instance_config: instance_config)
     model_id = 'BAAI/bge-large-en-v1.5'
-    [builder.build(model_id: model_id, model_data: { id: model_id, type: 'embedding', max_model_len: 512 })]
+    build_drafts(instance_config, tier: tier, model_id: model_id,
+                                  model_data: { id: model_id, type: 'embedding', max_model_len: 512 })
   end
 
-  def offering_builder(tier:, instance_config:)
+  def build_drafts(instance_config, tier:, model_id:, model_data:)
     cfg = instance_config.merge(tier: tier)
     instance_key = Legion::Extensions::Llm::Inventory::Identity::InstanceKey.new(
       provider_family: provider_family,
       instance_id: instance_id(instance_config: instance_config),
       physical_id: physical_id(instance_config: instance_config)
     )
-    Legion::Extensions::Llm::Vllm::Helpers::OfferingBuilder.new(
-      instance_cfg: cfg, instance_key: instance_key
-    )
+    [
+      Legion::Extensions::Llm::Vllm::Runners::Discovery.build_offering_draft(
+        instance_cfg: cfg, instance_key: instance_key, model_id: model_id, model_data: model_data
+      )
+    ]
   end
 
-  def safe_readiness(instance_config:, **)
+  # V8: readiness metadata carries the status class only — no endpoint in
+  # registry-published state (mirrors the production check_health shape).
+  def safe_readiness(**)
     Legion::Extensions::Llm::Inventory::ReadinessResult.new(
       ready: true,
       reason: 'vLLM /health returned 200',
-      metadata: { status: 200, base_url: instance_config[:vllm_api_base] }
+      metadata: { status: 200 }
     )
   end
 
@@ -212,11 +206,21 @@ RSpec.describe Legion::Extensions::Llm::Vllm do
   before do
     registry.reset!
     # Offline: stub the Faraday connection boundary so the production
-    # callable's dispatch (VllmCallable -> Vllm::Provider -> Connection#post)
-    # reaches a canned response without a real HTTP round-trip. The exact-fleet
-    # example asserts the captured callable is the one invoked.
+    # callable's dispatch (Helpers::Callable -> Vllm::Provider -> Connection#post)
+    # reaches a canned response without a real HTTP round-trip. Streaming
+    # dispatch drives the REAL on_data SSE handler with canned lines, so
+    # render_payload, parse_chunk and the StreamAccumulator all run for
+    # stream_chat. The response echoes the requested model (provider wire
+    # behavior) so B4 can assert the Selection-derived model round-trips.
+    # NOTE: any_instance stubs receive the instance as the first block arg.
     allow_any_instance_of(Legion::Extensions::Llm::Connection)
-      .to receive(:post).and_return(completion_response)
+      .to receive(:post) do |_connection, _url, payload, &block|
+        fake_request = Struct.new(:options, :headers).new(Faraday::RequestOptions.new, {})
+        block&.call(fake_request)
+        on_data = fake_request.options.on_data
+        stream_sse_lines.each { |line| on_data.call(line, 0, nil) } if on_data
+        canned_completion_response(payload)
+      end
   end
 
   def completion_response
@@ -229,7 +233,39 @@ RSpec.describe Legion::Extensions::Llm::Vllm do
     )
   end
 
+  def canned_completion_response(payload)
+    Struct.new(:body).new(
+      {
+        'choices' => [{ 'message' => { 'role' => 'assistant', 'content' => 'conformance' } }],
+        'model' => payload[:model],
+        'usage' => { 'prompt_tokens' => 1, 'completion_tokens' => 1 }
+      }
+    )
+  end
+
+  def stream_sse_lines
+    body = { 'id' => 'stream-1', 'model' => 'stream-model',
+             'choices' => [{ 'delta' => { 'content' => 'hello' }, 'finish_reason' => nil }] }
+    ["data: #{Legion::JSON.dump(body)}\n\n", "data: [DONE]\n\n"]
+  end
+
   it_behaves_like 'an SSOT v3 provider adapter'
+
+  # ─── 0.8.0 conformance kit — boundary groups against the real callable ────
+  # The kit (09 §5) is the single oracle: the B boundary examples run against
+  # the PRODUCTION Helpers::Callable (D1/D6 — no fake returning canonical objects
+  # directly). The outer Connection#post stub serves the canned response and
+  # drives the real on_data SSE handler, so render_payload / parse_response /
+  # parse_chunk / StreamAccumulator all run on these paths.
+
+  describe '0.8.0 conformance kit — canonical boundary (B groups)' do
+    let(:callable) { ssot_harness.build_callable(instance_config: ssot_harness.instance_configs[0]) }
+
+    it_behaves_like 'B1 — central canonical enforcement (08 F2)'
+    it_behaves_like 'B2 — canonical outputs (05 O5, 08 R2)'
+    it_behaves_like 'B3 — operation preservation (PR #189 defect class)'
+    it_behaves_like 'B4 — no model re-derivation (PR #45 law)'
+  end
 
   # ─── vLLM-specific identity: config name + secondary physical id ───────────
 
@@ -334,77 +370,30 @@ RSpec.describe Legion::Extensions::Llm::Vllm do
     it 'reproduces IDs after restart (identity is deterministic from inputs)' do
       config = ssot_harness.instance_configs[0]
       first_run = bring_up_instance(config)
-      first_offering_id = registry.snapshot.offerings_for(instance_key: first_run[:key]).first.offering_id
       first_lane_id = registry.snapshot.lanes_for(instance_key: first_run[:key]).first.lane_id
 
       # Simulate restart: reset and re-register
       registry.reset!
       second_run = bring_up_instance(config)
-      second_offering_id = registry.snapshot.offerings_for(instance_key: second_run[:key]).first.offering_id
       second_lane_id = registry.snapshot.lanes_for(instance_key: second_run[:key]).first.lane_id
 
-      expect(second_offering_id).to eq(first_offering_id)
       expect(second_lane_id).to eq(first_lane_id)
     end
   end
 
-  # ─── Tier change does NOT change lane/offering identity ─────────────────────
-
-  describe 'tier change and identity preservation' do
-    def bring_up_with_tier(config, tier:)
-      publisher = Legion::Extensions::Llm::Inventory::Publisher.new(provider_family: :vllm)
-      instance_id = ssot_harness.instance_id(instance_config: config)
-      key = Legion::Extensions::Llm::Inventory::Identity::InstanceKey.new(
-        provider_family: :vllm, instance_id: instance_id
-      )
-      callable = ssot_harness.build_callable(instance_config: config)
-      coordinator = Legion::Extensions::Llm::Inventory::ProbeCoordinator.new(
-        instance_key: key, enqueue: ->(**) { true }
-      )
-
-      token = publisher.claim_instance(instance_id: instance_id, callable: callable, probe_request_handle: coordinator)
-      probe = publisher.readiness_probe_started(instance_id: instance_id, publisher_token: token)
-      drafts = ssot_harness.build_offering_drafts(instance_config: config, callable: callable, tier: tier)
-      publisher.activate_instance_snapshot(
-        instance_id: instance_id, publisher_token: token, offerings: drafts, sequence: 0, probe_token: probe
-      )
-
-      { publisher: publisher, key: key, callable: callable, token: token, drafts: drafts }
-    end
-
-    it 'preserves offering_id and lane_id when tier changes from local to frontier' do
-      config = ssot_harness.instance_configs[0]
-      context = bring_up_with_tier(config, tier: :local)
-
-      before_offering = registry.snapshot.offerings_for(instance_key: context[:key]).first
-      before_lane = registry.snapshot.lanes_for(instance_key: context[:key]).first
-
-      # Republish with different tier
-      frontier_drafts = ssot_harness.build_offering_drafts(
-        instance_config: config, callable: context[:callable], tier: :frontier
-      )
-      context[:publisher].replace_instance_snapshot(
-        instance_id: ssot_harness.instance_id(instance_config: config),
-        publisher_token: context[:token],
-        offerings: frontier_drafts,
-        sequence: 1
-      )
-
-      after_offering = registry.snapshot.offerings_for(instance_key: context[:key]).first
-      after_lane = registry.snapshot.lanes_for(instance_key: context[:key]).first
-
-      expect(after_offering.offering_id).to eq(before_offering.offering_id)
-      expect(after_lane.lane_id).to eq(before_lane.lane_id)
-      expect(after_offering.tier).to eq(:frontier)
-    end
-  end
+  # The pre-0.8.0 invariant "tier change does NOT change offering identity" is
+  # REPLACED: the lane id IS the 5 tuple (tier:provider_family:instance_id:
+  # type:model) — tier is the first part, so a tier change changes the lane
+  # id. That invariant is the shared kit's canonical example ('an SSOT v3
+  # provider adapter' → 'reflects a tier change in the lane id'), already
+  # exercised above against the vLLM harness — no provider-local duplicate.
 
   # ─── Embedding operation evidence ──────────────────────────────────────────
 
   describe 'embedding operation support detection' do
     it 'does not advertise embed operation when usage.embedding is set but model type is not embedding' do
       Time.now.freeze
-      # usage.embedding alone is not sufficient per the discovery_refresh logic;
+      # usage.embedding alone is not sufficient per the discovery evidence logic;
       # model type must also be 'embedding'
       config = ssot_harness.instance_configs[0].merge(usage: { embedding: true })
       model_data = { id: 'meta-llama/Llama-3.1-8B-Instruct', type: 'chat' }
@@ -880,12 +869,13 @@ RSpec.describe Legion::Extensions::Llm::Vllm do
   end
 
   # ─── Dispatch boundary regression guards (live repro) ───────────────────────
-  # (B) legion-llm's prompt-cache step merges cache_control: { type: 'ephemeral' }
-  #     onto the last stable message hash of every >=2-message request. The
-  #     pre-fix Canonical::Message.from_hash did build(**h) with the whole hash,
-  #     so every multi-message vLLM request raised ArgumentError
-  #     'unknown keyword: :cache_control' before HTTP. from_hash now projects
-  #     onto the known member set.
+  # (B) legion-llm's prompt-cache step sets cache_control: { type: 'ephemeral' }
+  #     on the last stable message of every >=2-message request. As of lex-llm
+  #     0.7.7 that runs on CANONICAL objects (Message#with(cache_control:));
+  #     :cache_control is a first-class canonical member, and the provider
+  #     boundary rejects plain-Hash input loudly (the 2026-08-19 incident was a
+  #     Hash bypass silently re-canonicalized by this provider). The vLLM
+  #     OpenAI-compatible wire never carries the transport-only key.
   # (A) A non-UTF-8 (ASCII-8BIT) dispatch error message — a raw provider body or
   #     a Ruby kernel error — used to make RecordSupport.sanitized_reason raise
   #     ValidationError 'is not valid UTF-8', masking the real provider error as
@@ -897,37 +887,43 @@ RSpec.describe Legion::Extensions::Llm::Vllm do
     let(:provider) { Legion::Extensions::Llm::Vllm::Provider.new(config) }
     let(:callable) { ssot_harness.build_callable(instance_config: config) }
 
-    # The exact shape legion-llm's prompt-cache step produces
-    # (inference/steps/prompt_cache.rb#apply_conversation_breakpoint): a message
-    # hash that gained cache_control: { type: 'ephemeral' }.
+    # The exact shape legion-llm's prompt-cache step produces on canonical
+    # objects (inference/steps/prompt_cache.rb): the last stable message
+    # carries cache_control: { type: 'ephemeral' } as a canonical member.
     let(:two_message_request) do
       [
-        { role: 'user', content: 'What is the capital of France?', cache_control: { type: 'ephemeral' } },
-        { role: 'assistant', content: 'Paris.' }
+        Legion::Extensions::Llm::Canonical::Message.build(
+          role: :user, content: 'What is the capital of France?',
+          cache_control: { type: 'ephemeral' }
+        ),
+        Legion::Extensions::Llm::Canonical::Message.build(role: :assistant, content: 'Paris.')
       ]
     end
 
+    # H3 (0.8.0 funnel): the dispatch boundary enforces
+    # Hash<name, Canonical::ToolDefinition> — raw Hash tools are the bypass
+    # class and no longer cross chat/stream_chat.
     let(:tool_set) do
       {
-        get_weather: {
+        get_weather: Legion::Extensions::Llm::Canonical::ToolDefinition.build(
           name: 'get_weather',
           description: 'Get the current weather for a city',
           parameters: { type: 'object', properties: { city: { type: 'string' } }, required: %w[city] }
-        }
+        )
       }
     end
 
-    it 'renders a 2-message sync chat whose first message carries the prompt-cache :cache_control key' do
+    it 'renders a 2-message sync chat whose first canonical message carries the prompt-cache :cache_control member' do
       # render_payload is the production render seam (Provider#complete ->
-      # render_payload); calling it directly keeps the example HTTP-free. Pre-fix
-      # this raised ArgumentError 'unknown keyword: :cache_control' in
-      # Canonical::Message.from_hash before any HTTP.
+      # render_payload); calling it directly keeps the example HTTP-free.
+      # Canonical input with a :cache_control member must render to the
+      # OpenAI-compatible wire without leaking the transport-only key.
       wire = nil
       expect do
         wire = provider.send(
           :render_payload,
           two_message_request,
-          tools: tool_set, temperature: nil, model: model_id,
+          tools: tool_set, params: nil, model: model_id,
           stream: false, schema: nil, thinking: nil, tool_prefs: nil
         )
       end.not_to raise_error
@@ -944,28 +940,47 @@ RSpec.describe Legion::Extensions::Llm::Vllm do
       wire[:messages].each { |m| expect(m).not_to have_key(:cache_control) }
     end
 
-    it 'builds canonical messages from the prompt-cache message hashes, dropping the transport-only :cache_control' do
-      canonical = provider.send(:build_canonical_messages, two_message_request)
+    it 'keeps the canonical :cache_control member on the message, dropped only at the wire render' do
+      # :cache_control is a first-class canonical member (lex-llm 0.8.0); the
+      # canonical object carries it through build/to_h and the wire render
+      # above is where — and only where — it is dropped.
+      expect(Legion::Extensions::Llm::Canonical::Message.members).to include(:cache_control)
+      expect(two_message_request.map(&:cache_control)).to eq([{ type: 'ephemeral' }, nil])
+      expect(two_message_request.first.to_h).to include(cache_control: { type: 'ephemeral' })
+    end
 
-      expect(canonical).to all(be_a(Legion::Extensions::Llm::Canonical::Message))
-      expect(canonical.map(&:role)).to eq(%i[user assistant])
-      expect(canonical.map(&:content)).to eq(['What is the capital of France?', 'Paris.'])
-      expect(Legion::Extensions::Llm::Canonical::Message.members).not_to include(:cache_control)
+    it 'rejects plain Hash messages at the dispatch boundary instead of re-canonicalizing them' do
+      hash_request = [
+        { role: 'user', content: 'What is the capital of France?', cache_control: { type: 'ephemeral' } },
+        { role: 'assistant', content: 'Paris.' }
+      ]
+
+      # The 2026-08-19 defect class: hash messages silently re-canonicalized
+      # provider-side masked the bypass for 25 failed openai dispatches.
+      # Central enforcement (08 F2) rejects loudly at the callable boundary
+      # and in the Provider#complete funnel — the render seam no longer
+      # re-implements the check.
+      expect { callable.chat(hash_request, model: model_id) }
+        .to raise_error(ArgumentError, /Canonical::Message/)
+      expect { provider.chat(hash_request, model: model_id) }
+        .to raise_error(ArgumentError, /Canonical::Message/)
     end
 
     it 'completes a 2-message sync chat through the full provider path (render -> HTTP -> parse)' do
       # The Connection#post boundary is stubbed by the outer before block. If the
-      # render path raised (the pre-fix crash), the request never reached HTTP.
+      # render path raised (hash input, unknown canonical members), the request
+      # never reached HTTP. B2: the sync parse returns Canonical::Response,
+      # asserted by type.
       result = nil
       expect do
-        result = provider.chat(messages: two_message_request, model: model_id, tools: tool_set)
+        result = provider.chat(two_message_request, model: model_id, tools: tool_set)
       end.not_to raise_error
 
-      expect(result).to be_a(Legion::Extensions::Llm::Message)
-      expect(result.content).to eq('conformance')
+      expect(result).to be_a(Legion::Extensions::Llm::Canonical::Response)
+      expect(result.text).to eq('conformance')
     end
 
-    it 'normalizes a non-UTF-8 (ASCII-8BIT) RuntimeError message into a valid ProviderOutcome, not a ValidationError' do
+    it 'normalizes a non-UTF-8 (ASCII-8BIT) RuntimeError into a valid ProviderOutcome with a class-name reason' do
       binary = "vllm dispatch failed: \xFF\xFE invalid body bytes \x80\x81".dup.force_encoding(Encoding::ASCII_8BIT)
       error = RuntimeError.new(binary)
 
@@ -974,14 +989,15 @@ RSpec.describe Legion::Extensions::Llm::Vllm do
 
       expect(outcome).to be_a(Legion::Extensions::Llm::Routing::ProviderOutcome)
       expect(outcome.kind).to eq(:provider_error)
-      expect(outcome.reason).to be_a(String)
+      # V5: the reason is the bounded exception CLASS name — the non-UTF-8
+      # message never flows into the outcome, so the encoding hazard is
+      # structural (no message bytes cross the boundary), not a scrub.
+      expect(outcome.reason).to eq('RuntimeError')
       expect(outcome.reason.encoding).to eq(Encoding::UTF_8)
       expect(outcome.reason).to be_valid_encoding
-      expect(outcome.reason).to start_with('vllm dispatch failed: ')
-      expect(outcome.reason).to include('invalid body bytes')
     end
 
-    it 'normalizes a Faraday::ServerError with a non-UTF-8 message/body into a valid ProviderOutcome' do
+    it 'normalizes a Faraday::ServerError with a non-UTF-8 message/body into a class-name reason' do
       env = Faraday::Env.new
       env[:status] = 500
       env[:headers] = {}
@@ -994,9 +1010,8 @@ RSpec.describe Legion::Extensions::Llm::Vllm do
       expect { outcome = callable.normalize_dispatch_error(error: error) }.not_to raise_error
 
       expect(outcome.kind).to eq(:provider_error)
-      expect(outcome.reason.encoding).to eq(Encoding::UTF_8)
+      expect(outcome.reason).to eq('Faraday::ServerError')
       expect(outcome.reason).to be_valid_encoding
-      expect(outcome.reason).to start_with('500 - raw upstream body ')
     end
   end
 
@@ -1030,8 +1045,8 @@ RSpec.describe Legion::Extensions::Llm::Vllm do
       publisher = Legion::Extensions::Llm::Inventory::Publisher.new(provider_family: :vllm)
       callable = ssot_harness.build_callable(instance_config: config)
       token = claim_and_activate(publisher: publisher, callable: callable)
-      offering = registry.snapshot.offerings_for(instance_key: key).first
-      { publisher: publisher, token: token, offering: offering, callable: callable }
+      lane = registry.snapshot.lanes_for(instance_key: key).first
+      { publisher: publisher, token: token, lane: lane, callable: callable }
     end
 
     def claim_and_activate(publisher:, callable:)
@@ -1057,9 +1072,13 @@ RSpec.describe Legion::Extensions::Llm::Vllm do
     it 'rejects a mismatched offering_id' do
       activate_offering
 
+      # The claim value is a 5-tuple lane id (tier:provider_family:
+      # instance_id:type:model) — well-formed, but not on the activated
+      # instance, so it must raise the mismatch (a malformed id would fail
+      # validate_lane_id! before the mismatch check).
       envelope = {
         execution_contract: Legion::Extensions::Llm::Fleet::Protocol::EXACT_EXECUTION_CONTRACT,
-        offering_id: 'off:v1:0000000000000000000000000000000000000000000000000000000000000000',
+        offering_id: "local:vllm:#{instance_id}:inference:some-other-model",
         provider: 'vllm',
         provider_instance: instance_id,
         model: 'meta-llama/Llama-3.1-8B-Instruct',
@@ -1077,11 +1096,11 @@ RSpec.describe Legion::Extensions::Llm::Vllm do
 
       envelope = {
         execution_contract: Legion::Extensions::Llm::Fleet::Protocol::EXACT_EXECUTION_CONTRACT,
-        offering_id: ctx[:offering].offering_id,
+        offering_id: ctx[:lane].lane_id,
         provider: 'vllm',
         provider_instance: instance_id,
-        model: ctx[:offering].model,
-        operation: 'embed', # embed is unsupported for this offering
+        model: ctx[:lane].model,
+        operation: 'embed', # embed is unsupported for this lane
         params: { text: 'hello' }
       }
 
@@ -1095,7 +1114,7 @@ RSpec.describe Legion::Extensions::Llm::Vllm do
 
       envelope = {
         execution_contract: Legion::Extensions::Llm::Fleet::Protocol::EXACT_EXECUTION_CONTRACT,
-        offering_id: ctx[:offering].offering_id,
+        offering_id: ctx[:lane].lane_id,
         provider: 'vllm',
         provider_instance: instance_id,
         model: 'some-other-model/v1',
@@ -1124,10 +1143,10 @@ RSpec.describe Legion::Extensions::Llm::Vllm do
         instance_id: instance_id, publisher_token: new_token, offerings: new_drafts, sequence: 0, probe_token: new_probe
       )
 
-      # Old offering_id is now on a new callable - using old envelope should still work
+      # Old lane_id is now on a new callable - using old envelope should still work
       # because identity is deterministic, but the callable is different
-      new_offering = registry.snapshot.offerings_for(instance_key: key).first
-      expect(new_offering.offering_id).to eq(ctx[:offering].offering_id)
+      new_lane = registry.snapshot.lanes_for(instance_key: key).first
+      expect(new_lane.lane_id).to eq(ctx[:lane].lane_id)
     end
 
     it 'rejects an unavailable instance' do
@@ -1142,10 +1161,10 @@ RSpec.describe Legion::Extensions::Llm::Vllm do
 
       envelope = {
         execution_contract: Legion::Extensions::Llm::Fleet::Protocol::EXACT_EXECUTION_CONTRACT,
-        offering_id: ctx[:offering].offering_id,
+        offering_id: ctx[:lane].lane_id,
         provider: 'vllm',
         provider_instance: instance_id,
-        model: ctx[:offering].model,
+        model: ctx[:lane].model,
         operation: 'chat',
         params: { messages: [] }
       }
@@ -1165,12 +1184,12 @@ RSpec.describe Legion::Extensions::Llm::Vllm do
       # as a hard dependency from the actor/callable code.
       project_root = File.expand_path('../../../..', __dir__)
       actor_file = File.read(
-        File.join(project_root, 'lib/legion/extensions/llm/vllm/actors/discovery_refresh.rb')
+        File.join(project_root, 'lib/legion/extensions/llm/vllm/actors/discovery.rb')
       )
       expect(actor_file).not_to match(/\bLegion::LLM\b/)
     end
 
-    it 'VllmCallable does not reference Legion::LLM' do
+    it 'Helpers::Callable does not reference Legion::LLM' do
       callable = ssot_harness.build_callable(instance_config: ssot_harness.instance_configs[0])
       # The callable uses Legion::Extensions::Llm::Routing::ProviderOutcome, not Legion::LLM
       outcome = callable.normalize_dispatch_error(error: RuntimeError.new('test'))
@@ -1228,9 +1247,9 @@ RSpec.describe Legion::Extensions::Llm::Vllm do
     end
   end
 
-  # ─── VllmCallable direct contract ──────────────────────────────────────────
+  # ─── Helpers::Callable direct contract ─────────────────────────────────────
 
-  describe Legion::Extensions::Llm::Vllm::VllmCallable do
+  describe Legion::Extensions::Llm::Vllm::Helpers::Callable do
     let(:callable) do
       described_class.new(
         instance_cfg: ssot_harness.instance_configs[0],
@@ -1245,7 +1264,7 @@ RSpec.describe Legion::Extensions::Llm::Vllm do
 
     it 'implements the fleet dispatch operations the coordinator invokes' do
       %i[chat stream_chat embed count_tokens].each do |op|
-        expect(callable).to respond_to(op), "production VllmCallable must implement ##{op}"
+        expect(callable).to respond_to(op), "production Helpers::Callable must implement ##{op}"
       end
     end
 
@@ -1295,7 +1314,7 @@ RSpec.describe Legion::Extensions::Llm::Vllm do
       ]
 
       callable.chat(
-        messages: messages, model: 'meta-llama/Llama-3.1-8B-Instruct'
+        messages, model: 'meta-llama/Llama-3.1-8B-Instruct'
       )
 
       expect(captured[:path]).to eq('/v1/chat/completions')
