@@ -85,6 +85,21 @@ RSpec.describe Legion::Extensions::Llm::Vllm::Translator do
       expect(translator.render_request(req)).not_to have_key(:chat_template_kwargs)
     end
 
+    # New superset: enabled:false is an explicit OFF (forces a default-ON model off).
+    it 'renders enable_thinking:false when thinking is explicitly disabled' do
+      req = canonical::Request.build(messages: [], metadata: { model: 'm' },
+                                     thinking: canonical::Thinking::Config.build(enabled: false))
+      expect(translator.render_request(req)[:chat_template_kwargs]).to eq(enable_thinking: false)
+    end
+
+    # Cross-axis: an effort-only client still yields a budget for the vLLM wire
+    # via resolved_budget — never dropped, no params dual-home.
+    it 'derives thinking_budget from an effort-only config via resolved_budget' do
+      req = canonical::Request.build(messages: [], metadata: { model: 'm' },
+                                     thinking: canonical::Thinking::Config.build(effort: 'high'))
+      expect(translator.render_request(req)[:chat_template_kwargs]).to eq(enable_thinking: true, thinking_budget: 16_384)
+    end
+
     it 'renders tool_choice as named function for explicit choice' do
       fixture = fixture_with_model('canonical_tools_request').merge('tool_choice' => { name: 'get_weather' })
       req = canonical::Request.from_hash(fixture)
@@ -230,6 +245,53 @@ RSpec.describe Legion::Extensions::Llm::Vllm::Translator do
         expect { translator.parse_response({ 'error' => { 'message' => 'boom' } }) }
           .to raise_error(ArgumentError, /no choices/)
       end
+    end
+  end
+
+  # The provider-translator edge (O03a) must normalize the OpenAI Chat wire
+  # usage dialect (prompt_tokens/completion_tokens + nested *_details) into
+  # canonical keys BEFORE from_hash — otherwise the wire spellings fold into
+  # metadata and input_tokens/output_tokens resolve to nil (rendered 0).
+  describe '#parse_response usage (OpenAI wire dialect normalization)' do
+    it 'maps prompt_tokens/completion_tokens to canonical input/output tokens' do
+      wire = {
+        'model' => 'vllm-test',
+        'choices' => [{ 'message' => { 'content' => 'hi' }, 'finish_reason' => 'stop' }],
+        'usage' => { 'prompt_tokens' => 12, 'completion_tokens' => 34 }
+      }
+      usage = translator.parse_response(wire).usage
+      expect(usage.input_tokens).to eq(12)
+      expect(usage.output_tokens).to eq(34)
+    end
+
+    it 'extracts nested cached_tokens and reasoning_tokens (Chat API details)' do
+      wire = {
+        'model' => 'vllm-test',
+        'choices' => [{ 'message' => { 'content' => 'hi' }, 'finish_reason' => 'stop' }],
+        'usage' => {
+          'prompt_tokens' => 1000,
+          'completion_tokens' => 50,
+          'prompt_tokens_details' => { 'cached_tokens' => 800 },
+          'completion_tokens_details' => { 'reasoning_tokens' => 20 }
+        }
+      }
+      usage = translator.parse_response(wire).usage
+      expect(usage.input_tokens).to eq(1000)
+      expect(usage.output_tokens).to eq(50)
+      expect(usage.cache_read_tokens).to eq(800)
+      expect(usage.thinking_tokens).to eq(20)
+    end
+
+    it 'normalizes symbol-keyed usage (from Legion::JSON.load)' do
+      wire = {
+        'model' => 'vllm-test',
+        'choices' => [{ 'message' => { 'content' => 'hi' }, 'finish_reason' => 'stop' }],
+        'usage' => { prompt_tokens: 5, completion_tokens: 7, prompt_tokens_details: { cached_tokens: 3 } }
+      }
+      usage = translator.parse_response(wire).usage
+      expect(usage.input_tokens).to eq(5)
+      expect(usage.output_tokens).to eq(7)
+      expect(usage.cache_read_tokens).to eq(3)
     end
   end
 

@@ -199,15 +199,13 @@ module Legion
           # handled by the caller). A poison type silently rendering a
           # ZERO-param request (max_tokens/temperature/seed all dropped)
           # is a contract error, not a render path.
-          def map_params_to_wire(params)
+          def map_params_to_wire(params, **)
             unless params.is_a?(Canonical::Params)
               raise ArgumentError,
                     "vllm.translator: params must be Canonical::Params, got #{params.class}"
             end
 
-            wire = build_supported_params_wire(params)
-            log_unsupported_params(params)
-            wire
+            build_supported_params_wire(params)
           end
 
           def build_supported_params_wire(params)
@@ -224,15 +222,6 @@ module Legion
             when :stop_sequences  then format_stop_sequences(value)
             when :response_format then format_response_format_value(value)
             else value
-            end
-          end
-
-          def log_unsupported_params(params)
-            return unless params.max_thinking_tokens
-
-            log.debug do
-              'vLLM translator dropping unsupported params: max_thinking_tokens ' \
-                '(handled via vLLM-specific render paths)'
             end
           end
 
@@ -279,28 +268,32 @@ module Legion
 
         # Renders the canonical thinking state to the vLLM wire (V2).
         # The canonical request is the SOLE authority on thinking intent
-        # (R4): a silent request renders a silent wire. The per-instance
-        # config dial (enable_thinking) was a second authority that forked
-        # identical canonical requests across differently-configured
-        # instances — it is deleted. The budget axis consults
+        # (R4). A nil thinking config renders a silent wire; enabled: false
+        # renders enable_thinking:false (forcing a default-ON model off);
+        # enabled: true renders enable_thinking:true plus the resolved budget
+        # as the dialect's documented thinking_budget. The budget axis consults
         # Thinking::Config#resolved_budget (the cross-axis derivation the
-        # canonical config exists for) and rides the chat template as the
-        # dialect's documented thinking_budget.
+        # canonical config exists for) — there is no params dual-home.
         module TranslatorThinkingHelpers
           private
 
-          def apply_thinking_config(payload, request)
+          def apply_thinking_config(payload, request, **)
             thinking = request.thinking
-            return unless thinking.is_a?(Canonical::Thinking::Config) && thinking.enabled?
+            return unless thinking.is_a?(Canonical::Thinking::Config)
+
+            unless thinking.enabled
+              payload[:chat_template_kwargs] = { enable_thinking: false }
+              return
+            end
 
             kwargs = { enable_thinking: true }
-            budget = request.params&.max_thinking_tokens || thinking.resolved_budget
+            budget = thinking.resolved_budget
             kwargs[:thinking_budget] = budget if budget&.positive?
 
             payload[:chat_template_kwargs] = kwargs
             log.debug do
-              'vLLM translator thinking enabled via chat_template_kwargs ' \
-                "budget=#{kwargs[:thinking_budget].inspect}"
+              'vLLM translator thinking via chat_template_kwargs ' \
+                "enable_thinking=true budget=#{kwargs[:thinking_budget].inspect}"
             end
           end
         end
@@ -421,6 +414,40 @@ module Legion
             meta
           end
 
+          # Edge translation (O03a): vLLM speaks the OpenAI Chat wire usage
+          # dialect (prompt_tokens/completion_tokens + nested *_details).
+          # lex-llm 0.8.0's Canonical::Usage.from_hash reads canonical keys
+          # ONLY — the wire spellings must be normalized HERE, at the
+          # provider-translator boundary, or they fold into metadata and
+          # input/output_tokens resolve to nil (rendered 0). Canonical::Usage
+          # stays the SSOT: from_hash({}) is the valid all-nil no-usage object
+          # (never nil) for an absent wire usage.
+          def canonical_usage(raw)
+            return Canonical::Usage.from_hash({}) if raw.nil? || raw.empty?
+
+            source = raw.transform_keys { |key| key.respond_to?(:to_sym) ? key.to_sym : key }
+            Canonical::Usage.build(
+              input_tokens: source[:input_tokens] || source[:prompt_tokens],
+              output_tokens: source[:output_tokens] || source[:completion_tokens],
+              cache_read_tokens: extract_nested_cached_tokens(raw),
+              thinking_tokens: extract_nested_reasoning_tokens(raw)
+            )
+          end
+
+          def extract_nested_cached_tokens(raw)
+            raw.dig(:prompt_tokens_details, :cached_tokens) ||
+              raw.dig('prompt_tokens_details', 'cached_tokens') ||
+              raw.dig(:input_tokens_details, :cached_tokens) ||
+              raw.dig('input_tokens_details', 'cached_tokens')
+          end
+
+          def extract_nested_reasoning_tokens(raw)
+            raw.dig(:completion_tokens_details, :reasoning_tokens) ||
+              raw.dig('completion_tokens_details', 'reasoning_tokens') ||
+              raw.dig(:output_tokens_details, :reasoning_tokens) ||
+              raw.dig('output_tokens_details', 'reasoning_tokens')
+          end
+
           def build_canonical_response(wire)
             choice = Array(wire['choices']).first || {}
             message = choice['message'] || {}
@@ -436,7 +463,7 @@ module Legion
               text: (extraction.content || '').to_s,
               thinking: build_canonical_thinking(extraction),
               tool_calls: resolve_tool_calls(extraction, message),
-              usage: Canonical::Usage.from_hash(wire['usage'] || {}),
+              usage: canonical_usage(wire['usage']),
               stop_reason: map_stop_reason(choice['finish_reason']),
               model: wire['model'],
               metadata: wire_metadata(wire, message, thinking_meta)
@@ -463,7 +490,7 @@ module Legion
           def build_done_chunk(data)
             Canonical::Chunk.done(
               request_id: data['request_id'] || data['id'],
-              usage: Canonical::Usage.from_hash(data['usage']),
+              usage: canonical_usage(data['usage']),
               stop_reason: nil
             )
           end
@@ -536,14 +563,14 @@ module Legion
           def done_from_finish(data, request_id, finish_reason)
             Canonical::Chunk.done(
               request_id: request_id,
-              usage: data['usage'] ? Canonical::Usage.from_hash(data['usage']) : nil,
+              usage: data['usage'] ? canonical_usage(data['usage']) : nil,
               stop_reason: map_stop_reason(finish_reason)
             )
           end
 
           def parse_delta_content(delta, request_id, finish_reason, data)
             stop_reason = finish_reason ? map_stop_reason(finish_reason) : nil
-            usage = finish_reason && data['usage'] ? Canonical::Usage.from_hash(data['usage']) : nil
+            usage = finish_reason && data['usage'] ? canonical_usage(data['usage']) : nil
             tool_calls = Array(delta['tool_calls'])
             unless tool_calls.empty?
               return build_tool_call_chunks(tool_calls, delta['content'], request_id, stop_reason, usage)

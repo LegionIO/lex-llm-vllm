@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.4.8] - 2026-08-25
+
+### Changed
+- **Canonical Thinking::Config transposition.** The vLLM translator now renders the full expanded thinking config to wire:
+  - `enabled: false` renders `enable_thinking: false` (forces a default-ON model off).
+  - `enabled: true` renders `enable_thinking: true` + `thinking_budget` derived from `Thinking::Config#resolved_budget` (effort ladder: none|low|medium|high|xhigh|max → budget).
+  - The `params.max_thinking_tokens` dual-home is removed — `resolved_budget` is the single derivation path.
+- **Usage normalization at the provider boundary (O03a).** `canonical_usage` translates the OpenAI Chat wire usage dialect (`prompt_tokens`/`completion_tokens` + nested `*_details`) into canonical keys before `Usage.from_hash`, preventing wire spellings from folding into metadata with nil token counts.
+
+### Removed
+- `log_unsupported_params` (referenced deleted `params.max_thinking_tokens`).
+
 ## [0.4.7] - 2026-08-20
 
 ### Changed
