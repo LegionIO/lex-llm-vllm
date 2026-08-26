@@ -384,11 +384,19 @@ module Legion
             tool_calls
           end
 
-          # Sync tool calls: the ONE strict arguments parser (10 U2). Invalid
-          # or non-object JSON is a contract error that stays visible (04 L7,
-          # 08 E4) — never rescued into a fabricated empty call. V4: no
-          # source stamp — attribution is the executor's fact, not the
-          # provider's.
+          # Sync tool calls. V4: no source stamp — attribution is the
+          # executor's fact, not the provider's.
+          #
+          # Arguments resilience (rule 9): the tool CALL is the essential fact;
+          # losing it because the arguments payload isn't a clean JSON-object
+          # string is strictly worse than an empty-args call — the model called
+          # a tool but the client sees prose (the "random canary narration"
+          # regression). vLLM/qwen-family models return arguments in varying
+          # shapes run-to-run (a JSON string, an already-decoded Hash, or a
+          # degraded non-object like a bare number). Parse strictly; on a
+          # non-object/unparseable payload, log loudly and default to {} so the
+          # call still reaches the executor/client. A Hash is already decoded —
+          # pass it through.
           def parse_tool_calls(tool_calls)
             return [] unless tool_calls.is_a?(Array) && !tool_calls.empty?
 
@@ -398,9 +406,21 @@ module Legion
               id = call['id'] || name || call['index']
               Canonical::ToolCall.build(
                 id: id.to_s, name: name.to_s,
-                arguments: Responses::ToolArguments.parse!(function['arguments'])
+                arguments: parse_tool_call_arguments(function['arguments'], name)
               )
             end
+          end
+
+          def parse_tool_call_arguments(raw, tool_name)
+            return raw if raw.is_a?(Hash)
+
+            Responses::ToolArguments.parse!(raw)
+          rescue ArgumentError => e
+            log.warn(
+              "[llm][vllm][translator] action=tool_args_parse_failed tool=#{tool_name} " \
+              "error=#{e.message} — preserving the tool call with empty arguments"
+            )
+            {}
           end
 
           def wire_metadata(wire, message, _thinking_meta)
