@@ -6,13 +6,18 @@ This gem provides a complete vLLM adapter for the LegionIO LLM routing layer. It
 
 **Namespace:** `Legion::Extensions::Llm::Vllm`
 **Provider slug:** `:vllm`
-**Dependency:** `lex-llm >= 0.4.3`
+**Dependency:** `lex-llm >= 0.8.6`
 
 Load with:
 
 ```ruby
 require 'legion/extensions/llm/vllm'
 ```
+
+Multimodal calls consume canonical base64/URL image blocks. The provider renders
+ordered OpenAI `image_url` parts and preserves `detail` through chat, streaming and
+fleet JSON rehydration. Anthropic-specific cache-control fields are not emitted on
+the vLLM wire.
 
 ---
 
