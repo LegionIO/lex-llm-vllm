@@ -78,14 +78,14 @@ module Legion
           end
 
           def build_image_block(block)
-            return {} unless block.data || block.source_type
-
             url = if block.source_type == :base64 && block.media_type
                     "data:#{block.media_type};base64,#{block.data}"
                   else
                     block.data
                   end
-            { type: 'image_url', image_url: { url: url } }
+            image_url = { url: url }
+            image_url[:detail] = block.detail if block.detail
+            { type: 'image_url', image_url: image_url }
           end
         end
 

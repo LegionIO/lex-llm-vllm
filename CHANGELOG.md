@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.4.9] - 2026-10-31
+
+### Fixed
+- Preserve image detail and ordered base64/URL content through the actual chat and streaming callable after canonical JSON rehydration.
+
+### Changed
+- Require `lex-llm >= 0.8.6` for canonical image source normalization.
+
 ## [0.4.8] - 2026-08-25
 
 ### Changed
