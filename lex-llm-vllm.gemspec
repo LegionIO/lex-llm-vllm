@@ -32,5 +32,5 @@ Gem::Specification.new do |spec|
   # contract), the legacy Llm::Message/Chunk/ToolCall/ModelOffering/
   # ScopedRefresher surface is deleted, and the per-gem writer publishes
   # OfferingDrafts through the SSOT Registry.
-  spec.add_dependency 'lex-llm', '>= 0.8.0'
+  spec.add_dependency 'lex-llm', '>= 0.8.6'
 end

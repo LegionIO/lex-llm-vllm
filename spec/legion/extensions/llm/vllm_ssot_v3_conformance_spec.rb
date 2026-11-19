@@ -1296,6 +1296,49 @@ RSpec.describe Legion::Extensions::Llm::Vllm do
       expect(outcome.reason.length).to be <= 1024
     end
 
+    it 'preserves rehydrated mixed media and image detail on sync and streaming wire requests' do
+      canonical = Legion::Extensions::Llm::Canonical
+      original = canonical::Message.build(
+        role: :user,
+        content: [
+          canonical::ContentBlock.text('compare these'),
+          canonical::ContentBlock.image(data: 'AAECAw==', media_type: 'image/png', detail: 'high'),
+          canonical::ContentBlock.text('with this URL'),
+          canonical::ContentBlock.image(data: 'https://example.test/image.png?size=2',
+                                        media_type: nil, source_type: :url, detail: 'low')
+        ]
+      )
+      messages = [canonical::Message.from_hash(Legion::JSON.load(Legion::JSON.dump(original.to_h)))]
+      captured = []
+      allow_any_instance_of(Legion::Extensions::Llm::Connection)
+        .to receive(:post) do |_connection, path, payload, &block|
+          captured << { path: path, payload: payload }
+          request = Struct.new(:options, :headers).new(Faraday::RequestOptions.new, {})
+          block&.call(request)
+          on_data = request.options.on_data
+          stream_sse_lines.each { |line| on_data.call(line, 0, nil) } if on_data
+          canned_completion_response(payload)
+        end
+
+      sync = callable.chat(messages, model: 'meta-llama/Llama-3.1-8B-Instruct')
+      chunks = []
+      streamed = callable.stream_chat(messages, model: 'meta-llama/Llama-3.1-8B-Instruct') { |chunk| chunks << chunk }
+
+      expected_content = [
+        { type: 'text', text: 'compare these' },
+        { type: 'image_url', image_url: { url: 'data:image/png;base64,AAECAw==', detail: 'high' } },
+        { type: 'text', text: 'with this URL' },
+        { type: 'image_url', image_url: { url: 'https://example.test/image.png?size=2', detail: 'low' } }
+      ]
+      expect(captured.map { |entry| entry[:path] }).to eq(['/v1/chat/completions', '/v1/chat/completions'])
+      expect(captured.map { |entry| entry.dig(:payload, :stream) }).to eq([false, true])
+      expect(captured.map { |entry| entry.dig(:payload, :messages) })
+        .to eq(Array.new(2) { [{ role: 'user', content: expected_content }] })
+      expect(sync.text).to eq('conformance')
+      expect(streamed.text).to eq('hello')
+      expect(chunks.last.type).to eq(:done)
+    end
+
     it 'renders the dispatch-folded system prompt as the leading wire message (D14)' do
       captured = nil
       connection = instance_double(Legion::Extensions::Llm::Connection)
